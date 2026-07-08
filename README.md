@@ -1,4 +1,4 @@
-# Limit Order Book Auction Simulator
+# Full Scale ERP Pipeline for A Limit Order Book Auction Simulator
 
 A research implementation of a **Limit Order Book (LOB) auction simulator** built around **Queue Imbalance theory** for short-term price movement prediction and integrated with an ERP-style auction execution workflow.
 
