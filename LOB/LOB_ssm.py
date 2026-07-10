@@ -268,6 +268,7 @@ class OdooConfig:
 
 @dataclass
 class FetchedBid:
+    lead_id: int
     buyer: str
     price: float
     quantity: float
@@ -276,8 +277,12 @@ class FetchedBid:
 
 # Matches the description string written by BidIngestionClient.register_bid:
 #   "bid_ref=... price=45.02 qty=150 ts=2026-07-08T05:37:46.903003"
+# NOTE: Odoo's crm.lead.description is an HTML field - plain text you write
+# comes back wrapped in tags, e.g. "<p>...ts=2026-07-08T05:37:46.903003</p>".
+# The ts group must stop at '<' as well as whitespace, or it swallows the
+# trailing "</p>" and breaks datetime.fromisoformat().
 _BID_DESC_RE = re.compile(
-    r"price=(?P<price>[-\d.]+)\s+qty=(?P<qty>[-\d.]+)\s+ts=(?P<ts>\S+)"
+    r"price=(?P<price>[-\d.]+)\s+qty=(?P<qty>[-\d.]+)\s+ts=(?P<ts>[^\s<]+)"
 )
 
 
@@ -302,7 +307,7 @@ def fetch_bids_from_odoo(config: OdooConfig, stock_id: str,
 
     records = models.execute_kw(
         config.db, uid, config.api_key, "crm.lead", "search_read",
-        [domain], {"fields": ["partner_id", "description"], "limit": limit},
+        [domain], {"fields": ["id", "partner_id", "description"], "limit": limit},
     )
 
     bids = []
@@ -313,6 +318,7 @@ def fetch_bids_from_odoo(config: OdooConfig, stock_id: str,
             continue  # not a bid-shaped lead (or format changed) - skip, don't crash
         buyer = rec["partner_id"][1] if rec.get("partner_id") else "unknown"
         bids.append(FetchedBid(
+            lead_id=rec["id"],
             buyer=buyer,
             price=float(m.group("price")),
             quantity=float(m.group("qty")),
@@ -375,6 +381,93 @@ def run_on_odoo_bids(config: OdooConfig, stock_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Stage 5: determine the auction winner from the Odoo-sourced bid stream.
+#
+# This is genuinely separate from the SSM/IMM analysis above - the SSM
+# tells you what REGIME the market is in (stable/depleting), this tells
+# you WHO WINS. Both read the same fetch_bids_from_odoo() stream but
+# answer different questions, matching the Stage 2-4 vs Stage 5 split in
+# the original pipeline doc.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class AuctionWinner:
+    lead_id: int          # the exact Odoo crm.lead record this winner came from
+    buyer: str
+    price: float
+    quantity: float
+    timestamp: datetime
+
+
+def determine_auction_winner(bids: List[FetchedBid],
+                              ask_price: float,
+                              ask_qty: float) -> List[AuctionWinner]:
+    """
+    Standard price-time priority: among bids at or above ask_price, the
+    highest price wins first; ties broken by whoever bid earliest. Fills
+    are allocated against ask_qty until it runs out - so this can return
+    MULTIPLE winners if one bid doesn't consume the whole ask queue,
+    matching Stage 5's "awards the available shares at the current asking
+    price" (plural shares, potentially plural winners).
+
+    Bids below ask_price never win - they just sit in Odoo as a permanent
+    record that they existed and didn't clear, which is fine; Stage 1's
+    job was recording them, not guaranteeing they'd win.
+    """
+    eligible = [b for b in bids if b.price >= ask_price]
+    # price-time priority: highest price first, earliest timestamp breaks ties
+    eligible.sort(key=lambda b: (-b.price, b.timestamp))
+
+    winners = []
+    remaining = ask_qty
+    for b in eligible:
+        if remaining <= 0:
+            break
+        fill_qty = min(b.quantity, remaining)
+        winners.append(AuctionWinner(
+            lead_id=b.lead_id,
+            buyer=b.buyer, price=ask_price,  # awarded AT the ask price, not the bid price
+            quantity=fill_qty, timestamp=b.timestamp,
+        ))
+        remaining -= fill_qty
+
+    return winners
+
+
+
+def find_highest_bid_from_odoo(config: OdooConfig, stock_id: str,
+                                ask_price: float, ask_qty: float,
+                                since: Optional[datetime] = None) -> dict:
+    """
+    One-call convenience: fetch bids from Odoo for stock_id, determine the
+    winner(s) against the given ask, return a summary dict. Does NOT write
+    anything back to Odoo - promoting the winning lead to an Opportunity
+    and creating a Sales Order is a separate write-path step (Stage 6),
+    deliberately not bundled in here since this function is read-only,
+    same as the rest of lob_ssm.py's Odoo interaction.
+    """
+    bids = fetch_bids_from_odoo(config, stock_id, since=since)
+    if not bids:
+        raise ValueError(f"No registered bids found in Odoo for stock_id={stock_id!r}.")
+
+    highest = max(bids, key=lambda b: b.price)
+    winners = determine_auction_winner(bids, ask_price, ask_qty)
+
+    return {
+        "stock_id": stock_id,
+        "total_bids_seen": len(bids),
+        "highest_bid_price": highest.price,
+        "highest_bid_buyer": highest.buyer,
+        "highest_bid_timestamp": highest.timestamp,
+        "ask_price": ask_price,
+        "ask_qty": ask_qty,
+        "winners": winners,
+        "total_qty_filled": sum(w.quantity for w in winners),
+        "qty_unfilled": ask_qty - sum(w.quantity for w in winners),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Example driver: run the filter over a stream of LOB ticks
 # ---------------------------------------------------------------------------
 
@@ -424,6 +517,22 @@ if __name__ == "__main__":
         )
         print(f"Fetched and ran SSM on {len(feature_rows)} ticks from Odoo for {stock_id}\n")
         _print_feature_rows(feature_rows)
+
+        print(f"\n=== Stage 5: auction winner for {stock_id} ===")
+        result = find_highest_bid_from_odoo(
+            config, stock_id, ask_price=45.02, ask_qty=1000
+        )
+        print(f"Total bids seen: {result['total_bids_seen']}")
+        print(f"Highest bid overall: {result['highest_bid_price']:.2f} "
+              f"by {result['highest_bid_buyer']} at {result['highest_bid_timestamp']}")
+        print(f"Ask price/qty used: {result['ask_price']:.2f} / {result['ask_qty']:.0f}")
+        if result["winners"]:
+            print(f"\n{len(result['winners'])} winner(s), "
+                  f"{result['total_qty_filled']:.0f} of {result['ask_qty']:.0f} shares filled:")
+            for w in result["winners"]:
+                print(f"  {w.buyer:<20} won {w.quantity:.0f} @ {w.price:.2f}  ({w.timestamp})")
+        else:
+            print("No bids cleared the ask price - no winner this round.")
 
     else:
         # Toy example: a bid queue depleting over a few ticks, then the best
