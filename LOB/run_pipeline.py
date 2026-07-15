@@ -50,7 +50,9 @@ import unittest.mock as mock
 from Broker_Data import BrokerMarketData, BrokerConfig
 from bid_ingestion import validate_bids, BidIngestionClient, OdooConfig
 from Test_bid_generation import generate_random_bids  # dev/test only
-from LOB_ssm import run_on_odoo_bids, find_highest_bid_from_odoo, OdooConfig as SSMOdooConfig
+from LOB_ssm import (run_on_odoo_bids_and_asks, print_diagnostic_report,
+                       find_highest_bid_from_odoo, OdooConfig as SSMOdooConfig)
+from ask_book import AskBook
 from promote_winners import WinnerPromotionClient
 from Accounting import AccountingClient
 from Blanket_order_ledger import BlanketOrderLedger
@@ -97,18 +99,31 @@ def phase1_ingest(stock_id: str, odoo_config: OdooConfig, dry_run: bool = True,
 
 def phase2_analyze(stock_id: str, ssm_odoo_config: SSMOdooConfig,
                     initial_ask_price: float, initial_ask_qty: float):
-    """Odoo CRM -> SSM features, independent of Phase 1's run."""
-    print(f"=== Phase 2: running SSM on bids already in Odoo for {stock_id} ===")
-    feature_rows = run_on_odoo_bids(
-        ssm_odoo_config, stock_id,
+    """
+    The SSM's actual analysis: real bids from Odoo, real ask events from
+    ask_book.py, merged and run through the IMM filter. Odoo plays NO
+    role beyond being the source of the bid records - it doesn't gate or
+    influence this analysis, and this function doesn't write anything
+    back to Odoo. Odoo's role is purely to execute/record the auction
+    outcome later (Stages 5-8) - the SSM's diagnostic judgment happens
+    entirely here, independent of Odoo.
+    """
+    print(f"=== Phase 2: SSM diagnostic analysis for {stock_id} ===")
+
+    ask_book = AskBook()
+    if ask_book.get_current(stock_id) is None:
+        print(f"No ask book entries yet for {stock_id} - post one with: "
+              f"py ask_book.py {stock_id} <price> <qty>")
+        print(f"Falling back to a flat placeholder ask ({initial_ask_price}/{initial_ask_qty}) for now.\n")
+        ask_events = []
+    else:
+        ask_events = ask_book.get_events(stock_id)
+
+    feature_rows = run_on_odoo_bids_and_asks(
+        ssm_odoo_config, stock_id, ask_events,
         initial_ask_price=initial_ask_price, initial_ask_qty=initial_ask_qty,
     )
-    print(f"SSM produced {len(feature_rows)} feature rows from the Odoo-sourced bid stream\n")
-    for i, row in enumerate(feature_rows[:5], start=1):
-        print(f"  tick {i}: mid={row['mid_price']:.3f}  imbalance={row['queue_imbalance']:.3f}  "
-              f"P(bid_depleting)={row['p_bid_depleting']:.3f}")
-    if len(feature_rows) > 5:
-        print(f"  ... ({len(feature_rows) - 5} more)")
+    print_diagnostic_report(stock_id, feature_rows)
     return feature_rows
 
 
@@ -284,9 +299,16 @@ if __name__ == "__main__":
                 else TOTAL_COMMITTED
             )
 
+            # Use the REAL ask book price if one's been posted (matches
+            # Phase 2's data source) - falls back to the placeholder only
+            # if no ask has ever been posted for this stock.
+            ask_book = AskBook()
+            current_ask = ask_book.get_current(stock_id)
+            ask_price_this_round = current_ask[0] if current_ask else ASK_PRICE
+
             # Stage 3: find this cycle's winner(s) against the remaining ask qty
             result = phase3_find_winner(stock_id, ssm_odoo_config,
-                                         ask_price=ASK_PRICE, ask_qty=ask_qty_this_round)
+                                         ask_price=ask_price_this_round, ask_qty=ask_qty_this_round)
 
             if not result["winners"]:
                 print(f"No bids cleared the ask this cycle for {stock_id}.\n")

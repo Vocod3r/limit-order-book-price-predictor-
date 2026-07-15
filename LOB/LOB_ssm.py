@@ -362,6 +362,88 @@ def bids_to_ticks(bids: List[FetchedBid],
     return ticks
 
 
+def bids_and_asks_to_ticks(bids: List[FetchedBid], ask_events: List[dict],
+                            initial_ask_price: float, initial_ask_qty: float
+                            ) -> List[Dict[str, float]]:
+    """
+    Like bids_to_ticks(), but merges in REAL ask-side events from
+    ask_book.py instead of a frozen constant. Walks both streams in
+    chronological order, updating best_bid/best_ask/queues as either side
+    changes - this is what makes ASK_DEPLETING a real, reachable regime
+    instead of dead code.
+
+    ask_events: AskBook.get_events(stock_id) - a list of dicts with
+    "event_type" ("new_sell_limit_order"/"ask_reduced"/"ask_depleted"),
+    "timestamp", and either "resulting_best_ask"/"resulting_qty" (for new
+    orders) or "remaining_qty" (for depletion events).
+    """
+    # Tag each bid/ask event with a common "kind" so they can be merged
+    # and walked in one pass, sorted purely by timestamp.
+    merged = [("bid", b.timestamp, b) for b in bids]
+    for e in ask_events:
+        merged.append(("ask", datetime.fromisoformat(e["timestamp"]), e))
+    merged.sort(key=lambda item: item[1])
+
+    ticks = []
+    best_bid_price = None
+    best_bid_qty = 0.0
+    ask_price = initial_ask_price
+    ask_qty = initial_ask_qty
+
+    for kind, ts, item in merged:
+        if kind == "bid":
+            b = item
+            if best_bid_price is None or b.price > best_bid_price:
+                best_bid_price = b.price
+                best_bid_qty = b.quantity
+            elif b.price == best_bid_price:
+                best_bid_qty += b.quantity
+        else:
+            e = item
+            if e["event_type"] in ("new_sell_limit_order",):
+                ask_price = e["resulting_best_ask"]
+                ask_qty = e["resulting_qty"]
+            elif e["event_type"] in ("ask_reduced", "ask_depleted"):
+                ask_qty = e["remaining_qty"]
+
+        ticks.append({
+            "best_bid": best_bid_price if best_bid_price is not None else ask_price,
+            "best_ask": ask_price,
+            "bid_qty": best_bid_qty,
+            "ask_qty": ask_qty,
+        })
+
+    return ticks
+
+
+@dataclass
+class EventFlags:
+    """
+    Explicit, deterministic yes/no answers to the 4 events in Step 2.4 -
+    NOT probabilities. This is the "pinpoint whether X happened" layer,
+    computed directly from consecutive ticks by simple comparison. The
+    IMM's regime probabilities (p_bid_depleting etc.) are a SEPARATE,
+    softer signal answering "how confident is the filter that we're in
+    this kind of regime right now" - the two are complementary, not
+    duplicates: EventFlags says "yes, this specific thing just happened
+    on this specific tick"; the IMM says "the recent pattern of ticks
+    looks like this kind of regime overall."
+    """
+    ask_depleted: bool       # Event 1
+    new_higher_bid: bool     # Event 2
+    bid_depleted: bool       # Event 3
+    new_lower_ask: bool      # Event 4
+
+
+def detect_events(prev_tick: Dict[str, float], curr_tick: Dict[str, float]) -> EventFlags:
+    return EventFlags(
+        ask_depleted=(prev_tick["ask_qty"] > 0 and curr_tick["ask_qty"] <= 0),
+        new_higher_bid=(curr_tick["best_bid"] > prev_tick["best_bid"]),
+        bid_depleted=(prev_tick["bid_qty"] > 0 and curr_tick["bid_qty"] <= 0),
+        new_lower_ask=(curr_tick["best_ask"] < prev_tick["best_ask"]),
+    )
+
+
 def run_on_odoo_bids(config: OdooConfig, stock_id: str,
                       initial_ask_price: float, initial_ask_qty: float,
                       since: Optional[datetime] = None) -> List[Dict[str, float]]:
@@ -378,6 +460,104 @@ def run_on_odoo_bids(config: OdooConfig, stock_id: str,
         )
     ticks = bids_to_ticks(bids, initial_ask_price, initial_ask_qty)
     return run_on_ticks(ticks)
+
+
+def run_on_bids_and_asks(bids: List[FetchedBid], ask_events: List[dict],
+                          initial_ask_price: float, initial_ask_qty: float,
+                          dt: float = 1.0) -> List[Dict[str, float]]:
+    """
+    Like run_on_ticks(), but built from bids_and_asks_to_ticks() (real ask
+    data, not a frozen constant) and additionally attaches deterministic
+    EventFlags per tick alongside the IMM's probabilistic regime output.
+    """
+    ticks = bids_and_asks_to_ticks(bids, ask_events, initial_ask_price, initial_ask_qty)
+    if not ticks:
+        return []
+
+    x0 = np.array([ticks[0]["best_bid"], ticks[0]["best_ask"],
+                   ticks[0]["bid_qty"], ticks[0]["ask_qty"], 0.0, 0.0])
+    P0 = np.eye(N_STATES) * 1.0
+    imm = IMMFilter(dt, x0, P0)
+
+    out = []
+    prev_mid = (ticks[0]["best_bid"] + ticks[0]["best_ask"]) / 2.0
+    prev_tick = ticks[0]
+
+    for tick in ticks[1:]:
+        z = np.array([tick["best_bid"], tick["best_ask"], tick["bid_qty"], tick["ask_qty"]])
+        imm.step(z)
+        feats = extract_features(imm, prev_mid)
+
+        events = detect_events(prev_tick, tick)
+        feats["event_ask_depleted"] = events.ask_depleted
+        feats["event_new_higher_bid"] = events.new_higher_bid
+        feats["event_bid_depleted"] = events.bid_depleted
+        feats["event_new_lower_ask"] = events.new_lower_ask
+
+        out.append(feats)
+        prev_mid = feats["mid_price"]
+        prev_tick = tick
+
+    return out
+
+
+def run_on_odoo_bids_and_asks(config: OdooConfig, stock_id: str,
+                               ask_events: List[dict],
+                               initial_ask_price: float, initial_ask_qty: float,
+                               since: Optional[datetime] = None) -> List[Dict[str, float]]:
+    """
+    End-to-end: fetch real bids from Odoo AND real ask events (from
+    ask_book.py's AskBook.get_events(stock_id)), merge them, run the IMM
+    filter, and return per-tick features WITH explicit event flags. This
+    is the version that actually answers all 4 of Step 2.4's questions
+    with real data - use this instead of run_on_odoo_bids() going forward.
+    """
+    bids = fetch_bids_from_odoo(config, stock_id, since=since)
+    if not bids:
+        raise ValueError(
+            f"No registered bids found in Odoo for stock_id={stock_id!r}. "
+            "Has bid_ingestion.py been run for this stock yet?"
+        )
+    return run_on_bids_and_asks(bids, ask_events, initial_ask_price, initial_ask_qty)
+
+
+def print_diagnostic_report(stock_id: str, feature_rows: List[Dict[str, float]]):
+    """
+    The SSM's actual job, stated plainly: answer Step 2.4's 4 questions
+    out loud, plus the imbalance-based signal, so this reads as a
+    diagnostic report rather than a wall of per-tick numbers. Odoo has no
+    role here - this function never touches it. Odoo is purely the
+    execution/record-keeping layer downstream (Stages 5-8); everything
+    printed here is the SSM's own analysis of the bid/ask stream.
+    """
+    if not feature_rows:
+        print(f"=== SSM Diagnostic Report: {stock_id} ===")
+        print("No ticks to analyze.\n")
+        return
+
+    n = len(feature_rows)
+    ask_depleted_count = sum(1 for r in feature_rows if r.get("event_ask_depleted"))
+    new_higher_bid_count = sum(1 for r in feature_rows if r.get("event_new_higher_bid"))
+    bid_depleted_count = sum(1 for r in feature_rows if r.get("event_bid_depleted"))
+    new_lower_ask_count = sum(1 for r in feature_rows if r.get("event_new_lower_ask"))
+
+    latest = feature_rows[-1]
+
+    print(f"=== SSM Diagnostic Report: {stock_id} ({n} ticks analyzed) ===")
+    print(f"Event 1 (Ask Queue Depleted):     {'YES' if ask_depleted_count else 'no'} "
+          f"({ask_depleted_count} occurrence(s))")
+    print(f"Event 2 (New Higher Buy Limit):   {'YES' if new_higher_bid_count else 'no'} "
+          f"({new_higher_bid_count} occurrence(s))")
+    print(f"Event 3 (Bid Queue Depleted):     {'YES' if bid_depleted_count else 'no'} "
+          f"({bid_depleted_count} occurrence(s))")
+    print(f"Event 4 (New Lower Sell Limit):   {'YES' if new_lower_ask_count else 'no'} "
+          f"({new_lower_ask_count} occurrence(s))")
+    print(f"\nLatest queue imbalance: {latest['queue_imbalance']:+.3f} "
+          f"({'bid-heavy' if latest['queue_imbalance'] > 0 else 'ask-heavy'})")
+    print(f"Latest regime estimate: stable={latest['p_stable']:.2f}  "
+          f"bid_depleting={latest['p_bid_depleting']:.2f}  "
+          f"ask_depleting={latest['p_ask_depleting']:.2f}")
+    print(f"Latest mid price: {latest['mid_price']:.2f}  spread: {latest['spread']:.2f}\n")
 
 
 # ---------------------------------------------------------------------------

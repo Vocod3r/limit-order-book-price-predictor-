@@ -6,5 +6,13 @@
   "day3_auction": {
     "total_committed": 1000,
     "shares_sold": 1000.0
+  },
+  "auction_bids": {
+    "total_committed": 1000,
+    "shares_sold": 1000.0
+  },
+  "auction_14072026": {
+    "total_committed": 1000,
+    "shares_sold": 1000.0
   }
 }
