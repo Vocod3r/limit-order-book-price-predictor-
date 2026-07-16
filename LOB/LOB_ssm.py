@@ -560,6 +560,72 @@ def print_diagnostic_report(stock_id: str, feature_rows: List[Dict[str, float]])
     print(f"Latest mid price: {latest['mid_price']:.2f}  spread: {latest['spread']:.2f}\n")
 
 
+def fit_event_conditioned_predictor(feature_rows: List[Dict[str, float]]):
+    """
+    Gould & Bonart (2015): fit a logistic regression of ONE-TICK-AHEAD
+    price direction on queue imbalance. Here, restricted to ticks where
+    one of the 4 Step 2.4 events just fired - that's the actual point of
+    running the diagnostics first: imbalance is only a meaningful signal
+    right after something diagnostically significant happened (a
+    depletion, a new limit order), not on every quiet tick where nothing
+    changed. This mirrors the paper's framing directly: the events are
+    what CAUSE imbalance to shift, and it's that shift the regression is
+    meant to explain.
+
+    Returns (model, X, y) - model is None if there isn't enough
+    event-triggered data with both price-direction classes represented to
+    fit a meaningful regression yet.
+    """
+    from sklearn.linear_model import LogisticRegression
+
+    X, y = [], []
+    for i in range(len(feature_rows) - 1):
+        row = feature_rows[i]
+        next_row = feature_rows[i + 1]
+
+        event_fired = (row.get("event_ask_depleted") or row.get("event_new_higher_bid")
+                       or row.get("event_bid_depleted") or row.get("event_new_lower_ask"))
+        label = next_row.get("mid_price_label")  # 1=up, 0=down, None=unchanged
+
+        if event_fired and label is not None:
+            X.append([row["queue_imbalance"]])
+            y.append(label)
+
+    if len(y) < 5 or len(set(y)) < 2:
+        return None, X, y
+
+    model = LogisticRegression()
+    model.fit(X, y)
+    return model, X, y
+
+
+def print_event_conditioned_prediction(stock_id: str, feature_rows: List[Dict[str, float]]):
+    """
+    The actual Gould & Bonart step: given the diagnostics above found
+    event-triggered imbalance shifts, fit the imbalance -> direction
+    regression on those specific ticks and report what it says about the
+    CURRENT imbalance right now.
+    """
+    print(f"=== Event-conditioned imbalance predictor: {stock_id} ===")
+    model, X, y = fit_event_conditioned_predictor(feature_rows)
+
+    if model is None:
+        print(f"Only {len(y)} event-triggered tick(s) with a known next-tick "
+              f"direction so far (need >=5, with both up and down represented) - "
+              f"not enough to fit yet.\n")
+        return None
+
+    latest_imbalance = feature_rows[-1]["queue_imbalance"]
+    p_up = model.predict_proba([[latest_imbalance]])[0][1]
+
+    print(f"Fitted on {len(y)} event-triggered tick(s) "
+          f"({sum(y)} up, {len(y) - sum(y)} down).")
+    print(f"Given the current imbalance ({latest_imbalance:+.3f}): "
+          f"P(price up next tick) = {p_up:.3f}\n")
+    return p_up
+
+
+
 # ---------------------------------------------------------------------------
 # Stage 5: determine the auction winner from the Odoo-sourced bid stream.
 #

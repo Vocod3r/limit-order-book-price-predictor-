@@ -1,0 +1,38 @@
+{
+  "event4test": {
+    "price": 44.9,
+    "qty": 300.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 45.02,
+        "quantity": 500.0,
+        "resulting_best_ask": 45.02,
+        "resulting_qty": 500.0,
+        "timestamp": "2026-07-15T09:41:54.053019"
+      },
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 44.9,
+        "quantity": 300.0,
+        "resulting_best_ask": 44.9,
+        "resulting_qty": 300.0,
+        "timestamp": "2026-07-15T09:42:08.145474"
+      }
+    ]
+  },
+  "auction_14072026": {
+    "price": 44.9,
+    "qty": 300.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 44.9,
+        "quantity": 300.0,
+        "resulting_best_ask": 44.9,
+        "resulting_qty": 300.0,
+        "timestamp": "2026-07-15T10:06:13.336767"
+      }
+    ]
+  }
+}

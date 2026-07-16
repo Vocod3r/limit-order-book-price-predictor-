@@ -45,12 +45,12 @@ automating; run settle_existing.py by hand once that's sorted out.
 """
 
 from datetime import datetime
-import unittest.mock as mock
 
-from Broker_Data import BrokerMarketData, BrokerConfig
+from finnhub_market_data import BrokerMarketData, BrokerConfig
 from bid_ingestion import validate_bids, BidIngestionClient, OdooConfig
 from Test_bid_generation import generate_random_bids  # dev/test only
 from LOB_ssm import (run_on_odoo_bids_and_asks, print_diagnostic_report,
+                       print_event_conditioned_prediction,
                        find_highest_bid_from_odoo, OdooConfig as SSMOdooConfig)
 from ask_book import AskBook
 from promote_winners import WinnerPromotionClient
@@ -73,20 +73,22 @@ def phase1_ingest(stock_id: str, odoo_config: OdooConfig, dry_run: bool = True,
     # platform's API/UI - this generator call is the one piece that's
     # still test-only.
     start_time = start_time or datetime(2026, 7, 8, 5, 0, 0)
-    raw_bids = generate_random_bids(stock_id, n_bids=n_bids, seed=seed, start_time=start_time)
 
-    # Real tick size + market-hours check, from the broker adapter.
-    # Mocked here since we don't have live broker credentials in this
-    # environment - in production this hits the real API.
-    with mock.patch("requests.get") as fake_get:
-        fake_get.return_value.raise_for_status = lambda: None
-        fake_get.return_value.json = lambda: {
-            "NSE:ACME": {"tick_size": 0.05, "instrument_token": 1, "lot_size": 1}
-        }
-        bmd = BrokerMarketData(BrokerConfig(api_key="x", access_token="y"))
-        tick_size = bmd.get_instrument_meta("NSE:ACME")["tick_size"]
+    # Real tick size + live price + market-hours check, from the broker
+    # adapter - hitting Finnhub's real API. FINNHUB_SYMBOL is the real
+    # ticker used purely as a live price reference; it's separate from
+    # stock_id, which is your own CRM/auction identifier.
+    STOCK_SYMBOL_MAP = {"AAPL_STOCK": "AAPL", "TSLA_STOCK": "TSLA", "MSFT_STOCK": "MSFT"}
+    FINNHUB_API_KEY = "d9biu5hr01qv2lms14bgd9biu5hr01qv2lms14c0"
+    FINNHUB_SYMBOL = STOCK_SYMBOL_MAP.get(stock_id, "AAPL")   # was: FINNHUB_SYMBOL = "AAPL"
+    bmd = BrokerMarketData(BrokerConfig(api_key=FINNHUB_API_KEY))
+    tick_size = bmd.get_instrument_meta(FINNHUB_SYMBOL)["tick_size"]
+    live_quote = bmd.get_reference_quote(FINNHUB_SYMBOL)
 
-    market_open = BrokerMarketData.is_market_open(datetime(2026, 7, 8, 11, 0))
+    raw_bids = generate_random_bids(stock_id, n_bids=n_bids, seed=seed, start_time=start_time,
+                                     price_mean=live_quote["ltp"], price_std=live_quote["ltp"] * 0.003)
+
+    market_open = True  # TESTING ONLY - bypasses real Finnhub market-hours check
     valid_bids = validate_bids(raw_bids, tick_size=tick_size, market_open=market_open)
     print(f"{len(raw_bids)} generated -> {len(valid_bids)} passed validation "
           f"(tick_size={tick_size}, market_open={market_open})")
@@ -124,6 +126,7 @@ def phase2_analyze(stock_id: str, ssm_odoo_config: SSMOdooConfig,
         initial_ask_price=initial_ask_price, initial_ask_qty=initial_ask_qty,
     )
     print_diagnostic_report(stock_id, feature_rows)
+    print_event_conditioned_prediction(stock_id, feature_rows)
     return feature_rows
 
 

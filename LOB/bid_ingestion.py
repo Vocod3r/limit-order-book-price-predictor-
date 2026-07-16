@@ -177,50 +177,25 @@ class BidIngestionClient:
 
 
 if __name__ == "__main__":
-    try:
-        from Broker_Data import BrokerMarketData, BrokerConfig
-    except Exception:
-        # Fallback minimal stubs for environments where the broker module
-        # isn't available (keeps the demo runnable). Real deployments
-        # should provide the proper Broker_Data module.
-        class BrokerConfig:
-            def __init__(self, api_key: str = "", access_token: str = ""):
-                self.api_key = api_key
-                self.access_token = access_token
-
-        class BrokerMarketData:
-            def __init__(self, cfg: BrokerConfig):
-                self.cfg = cfg
-
-            def get_instrument_meta(self, symbol: str):
-                # Example fallback meta used in the demo
-                return {"tick_size": 0.05, "instrument_token": 12345, "lot_size": 1}
-
-            @staticmethod
-            def is_market_open(ts: datetime = None) -> bool:
-                # Simple fallback: consider market open between 9:15 and 15:30
-                now = ts or datetime.now()
-                return now.hour >= 9 and (now.hour < 15 or (now.hour == 15 and now.minute <= 30))
+    from finnhub_market_data import BrokerMarketData, BrokerConfig
     from Test_bid_generation import generate_random_bids  # test data only - see that file's docstring
-    import unittest.mock as mock
     from datetime import datetime
 
     raw_bids = generate_random_bids("ACME_CORP_STOCK", n_bids=50, seed=1)
     print(f"Generated {len(raw_bids)} raw bids (TEST DATA - real bids come from your platform's clients)")
 
-    # In production: bmd.get_instrument_meta(symbol)["tick_size"] and
-    # bmd.is_market_open() would hit the real broker API. Mocked here so
-    # this demo runs without live credentials - see broker_market_data.py.
-    fake_meta = {"NSE:ACME": {"tick_size": 0.05, "instrument_token": 12345, "lot_size": 1}}
-    with mock.patch("requests.get") as fake_get:
-        fake_get.return_value.raise_for_status = lambda: None
-        fake_get.return_value.json = lambda: fake_meta
-        bmd = BrokerMarketData(BrokerConfig(api_key="x", access_token="y"))
-        tick_size = bmd.get_instrument_meta("NSE:ACME")["tick_size"]
+    # Real Finnhub call - no mocking needed anymore, this hits the live API.
+    # ACME_CORP_STOCK (the CRM stock_id) and AAPL (the real price-feed
+    # symbol) are deliberately different things - the CRM identifier
+    # doesn't need to match a real ticker.
+    bmd = BrokerMarketData(BrokerConfig(api_key="YOUR_FINNHUB_API_KEY"))
+    tick_size = bmd.get_instrument_meta("AAPL")["tick_size"]
 
-    market_open = BrokerMarketData.is_market_open(datetime(2026, 7, 8, 11, 0))
-    print(f"Real tick_size for this instrument: {tick_size} (not the old hardcoded 0.01)")
-    print(f"Market open: {market_open}")
+    # is_market_open is now an INSTANCE method (needs bmd.client to hit
+    # Finnhub's real market-status endpoint) - not a staticmethod anymore.
+    market_open = bmd.is_market_open("US")
+    print(f"Real tick_size for this instrument: {tick_size}")
+    print(f"Market open (real, from Finnhub): {market_open}")
 
     valid_bids = validate_bids(raw_bids, tick_size=tick_size, market_open=market_open)
     print(f"{len(valid_bids)} bids passed tick-size + market-hours validation")
