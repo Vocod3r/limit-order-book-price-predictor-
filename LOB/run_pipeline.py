@@ -44,6 +44,7 @@ automating; run settle_existing.py by hand once that's sorted out.
                       in the queue.
 """
 
+import xmlrpc.client
 from datetime import datetime
 
 from finnhub_market_data import BrokerMarketData, BrokerConfig
@@ -78,9 +79,9 @@ def phase1_ingest(stock_id: str, odoo_config: OdooConfig, dry_run: bool = True,
     # adapter - hitting Finnhub's real API. FINNHUB_SYMBOL is the real
     # ticker used purely as a live price reference; it's separate from
     # stock_id, which is your own CRM/auction identifier.
-    STOCK_SYMBOL_MAP = {"AAPL_STOCK": "AAPL", "TSLA_STOCK": "TSLA", "MSFT_STOCK": "MSFT"}
     FINNHUB_API_KEY = "d9biu5hr01qv2lms14bgd9biu5hr01qv2lms14c0"
-    FINNHUB_SYMBOL = STOCK_SYMBOL_MAP.get(stock_id, "AAPL")   # was: FINNHUB_SYMBOL = "AAPL"
+    STOCK_SYMBOL_MAP = {"AAPL_STOCK": "AAPL", "TSLA_STOCK": "TSLA", "MSFT_STOCK": "MSFT"}
+    FINNHUB_SYMBOL = STOCK_SYMBOL_MAP.get(stock_id, "AAPL")
     bmd = BrokerMarketData(BrokerConfig(api_key=FINNHUB_API_KEY))
     tick_size = bmd.get_instrument_meta(FINNHUB_SYMBOL)["tick_size"]
     live_quote = bmd.get_reference_quote(FINNHUB_SYMBOL)
@@ -256,18 +257,40 @@ def phase8_inventory_decision(state) -> str:
         return "move_to_next_stock"
 
 
+def send_completion_email(config: OdooConfig, to_email: str, invoiced_count: int, stock_queue: list):
+    """Sends a plain confirmation email via Odoo's own outgoing mail server
+    (mail.mail) once the whole pipeline run is done."""
+    common = xmlrpc.client.ServerProxy(f"{config.url}/xmlrpc/2/common")
+    uid = common.authenticate(config.db, config.username, config.api_key, {})
+    models = xmlrpc.client.ServerProxy(f"{config.url}/xmlrpc/2/object")
+    body = (f"Pipeline run complete.<br/>Stocks processed: {', '.join(stock_queue)}<br/>"
+            f"Invoices settled this run: {invoiced_count}")
+    mail_id = models.execute_kw(config.db, uid, config.api_key, "mail.mail", "create", [{
+        "subject": "Auction pipeline run complete",
+        "body_html": body,
+        "email_to": to_email,
+    }])
+    models.execute_kw(config.db, uid, config.api_key, "mail.mail", "send", [[mail_id]])
+    print(f"\nCompletion email sent to {to_email}.")
+
+
 if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 5:
         print("Usage: python3 run_pipeline.py <odoo_url> <odoo_db> <odoo_username> <odoo_api_key> "
-              "<stock_id_1> [stock_id_2] [stock_id_3] ...")
+              "[--to recipient@example.com] <stock_id_1> [stock_id_2] ...")
         print("Example (against mock_odoo_server.py): "
               "python3 run_pipeline.py http://localhost:8069 fakedb fakeuser fakekey STOCK_A STOCK_B")
         sys.exit(1)
 
     url, db, username, api_key = sys.argv[1:5]
-    stock_queue = sys.argv[5:] if len(sys.argv) > 5 else ["MOCK_STOCK"]
+    remaining_args = sys.argv[5:]
+    RECIPIENT_EMAIL = "your.gmail@gmail.com"  # default - overridden by --to below
+    if remaining_args[:1] == ["--to"]:
+        RECIPIENT_EMAIL = remaining_args[1]
+        remaining_args = remaining_args[2:]
+    stock_queue = remaining_args if remaining_args else ["MOCK_STOCK"]
 
     odoo_config = OdooConfig(url=url, db=db, username=username, api_key=api_key)
     ssm_odoo_config = SSMOdooConfig(url=url, db=db, username=username, api_key=api_key)
@@ -278,6 +301,7 @@ if __name__ == "__main__":
                                # doesn't loop forever
 
     ledger = BlanketOrderLedger()
+    invoiced_count = 0
 
     for stock_id in stock_queue:
         print(f"\n{'#'*70}\n# STARTING STOCK: {stock_id}\n{'#'*70}\n")
@@ -325,6 +349,8 @@ if __name__ == "__main__":
             promotion_result = phase4_promote_winners(
                 stock_id, ssm_odoo_config, result["winners"], dry_run=False
             )
+            phase5_settle_accounting(promotion_result, ssm_odoo_config, dry_run=False)
+            invoiced_count += sum(1 for r in promotion_result["results"] if r["status"] == "promoted")
             state = phase6_update_blanket_order(
                 stock_id, result["winners"], total_committed=TOTAL_COMMITTED
             )
@@ -338,5 +364,5 @@ if __name__ == "__main__":
                   f"without fully filling the blanket order - moving on anyway.\n")
 
     print(f"\n{'#'*70}\n# ALL STOCKS IN QUEUE PROCESSED\n{'#'*70}")
-    print("\nInvoicing was NOT run automatically - see settle_existing.py to "
-          "invoice/pay the sale orders created above by hand.")
+    send_completion_email(odoo_config, to_email=RECIPIENT_EMAIL,
+                           invoiced_count=invoiced_count, stock_queue=stock_queue)
