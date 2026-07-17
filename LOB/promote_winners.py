@@ -57,6 +57,9 @@ class WinnerPromotionClient:
         existing = self._execute("product.product", "search", [("name", "=", name)])
         pid = existing[0] if existing else self._execute("product.product", "create", {
             "name": name, "type": "service", "sale_ok": True,
+            "invoice_policy": "order",  # invoice on ordered qty, not delivered
+                                          # qty - these are synthetic auction
+                                          # "products" with no real delivery step
         })
         self._product_cache[name] = pid
         return pid

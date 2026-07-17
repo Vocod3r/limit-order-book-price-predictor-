@@ -54,24 +54,51 @@ class AccountingClient:
         """
         Generates a customer invoice from a confirmed sale order and posts
         it. Returns {"status": ..., "invoice_id": ...} or an error dict.
+
+        Uses the sale.advance.payment.inv wizard - the same public model
+        the "Create Invoice" button in the UI drives - because Odoo 17+
+        blocks calling private methods like sale.order._create_invoices
+        directly over XML-RPC ("Private methods cannot be called
+        remotely"). advance_payment_method="delivered" means "invoice the
+        full order", matching the old _create_invoices behavior.
         """
         try:
             if self.dry_run:
                 return {"status": "dry_run", "sale_order_id": sale_order_id,
                          "would_do": "create + post invoice for this sale order"}
 
-            # _create_invoices() is the method Odoo's own "Create Invoice"
-            # button calls internally. Despite the leading underscore
-            # (Odoo's convention for "not meant to be a UI button target
-            # directly"), it's a normal model method and callable via
-            # execute_kw - this is how it's driven programmatically.
-            invoice_ids = self._execute("sale.order", "_create_invoices", [sale_order_id])
+            order = self._execute("sale.order", "read", [sale_order_id], ["invoice_ids", "invoice_status"])
+            existing_invoice_ids = order[0]["invoice_ids"] if order else []
+            if existing_invoice_ids:
+                invoice_id = existing_invoice_ids[0]
+                state = self._execute("account.move", "read", [invoice_id], ["state"])[0]["state"]
+                if state != "posted":
+                    self._execute("account.move", "action_post", [invoice_id])
+                return {"status": "posted", "sale_order_id": sale_order_id, "invoice_id": invoice_id}
+
+            context = {"active_model": "sale.order", "active_ids": [sale_order_id],
+                       "active_id": sale_order_id}
+            wizard_id = self._execute(
+                "sale.advance.payment.inv", "create",
+                {"advance_payment_method": "delivered"}, context=context,
+            )
+            try:
+                self._execute("sale.advance.payment.inv", "create_invoices", [wizard_id], context=context)
+            except xmlrpc.client.Fault as e:
+                if "cannot marshal None" not in str(e):
+                    raise
+                # create_invoices() succeeded server-side; only its action
+                # dict (used to redirect the UI, not needed here) failed
+                # to serialize back - safe to ignore.
+
+            order = self._execute("sale.order", "read", [sale_order_id], ["invoice_ids"])
+            invoice_ids = order[0]["invoice_ids"] if order else []
             if not invoice_ids:
                 return {"status": "error", "sale_order_id": sale_order_id,
-                         "error": "_create_invoices returned no invoice - order may "
-                                   "already be fully invoiced, or have no invoiceable lines"}
+                         "error": "invoice wizard ran but no invoice_ids found on the order - "
+                                   "order may already be fully invoiced, or have no invoiceable lines"}
 
-            invoice_id = invoice_ids[0] if isinstance(invoice_ids, list) else invoice_ids
+            invoice_id = invoice_ids[0]
 
             # Post the invoice (draft -> posted). This is what actually
             # generates the journal entries in Odoo's accounting.
@@ -96,18 +123,21 @@ class AccountingClient:
                 return {"status": "dry_run", "invoice_id": invoice_id,
                          "would_do": f"register payment (amount={amount or 'full'})"}
 
-            wizard_vals = {
-                "active_model": "account.move",
-                "active_ids": [invoice_id],
-            }
+            wizard_vals = {}
             if amount is not None:
                 wizard_vals["amount"] = amount
 
+            context = {"active_model": "account.move", "active_ids": [invoice_id]}
             wizard_id = self._execute(
-                "account.payment.register", "create", wizard_vals,
-                context={"active_model": "account.move", "active_ids": [invoice_id]},
+                "account.payment.register", "create", wizard_vals, context=context,
             )
-            result = self._execute("account.payment.register", "action_create_payments", [wizard_id])
+            try:
+                result = self._execute("account.payment.register", "action_create_payments",
+                                        [wizard_id], context=context)
+            except xmlrpc.client.Fault as e:
+                if "cannot marshal None" not in str(e):
+                    raise
+                result = None  # succeeded server-side; only the action-dict response failed to serialize
 
             return {"status": "paid", "invoice_id": invoice_id, "wizard_result": result}
 

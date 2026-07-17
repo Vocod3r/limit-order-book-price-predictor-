@@ -44,12 +44,12 @@ automating; run settle_existing.py by hand once that's sorted out.
                       in the queue.
 """
 
+import base64
 import xmlrpc.client
 from datetime import datetime
 
+from bid_ingestion import OdooConfig
 from finnhub_market_data import BrokerMarketData, BrokerConfig
-from bid_ingestion import validate_bids, BidIngestionClient, OdooConfig
-from Test_bid_generation import generate_random_bids  # dev/test only
 from LOB_ssm import (run_on_odoo_bids_and_asks, print_diagnostic_report,
                        print_event_conditioned_prediction,
                        find_highest_bid_from_odoo, OdooConfig as SSMOdooConfig)
@@ -57,47 +57,6 @@ from ask_book import AskBook
 from promote_winners import WinnerPromotionClient
 from Accounting import AccountingClient
 from Blanket_order_ledger import BlanketOrderLedger
-
-
-def phase1_ingest(stock_id: str, odoo_config: OdooConfig, dry_run: bool = True,
-                   seed: int = 5, start_time: datetime = None, n_bids: int = 60):
-    """Bids -> validated -> written to Odoo CRM.
-
-    seed/start_time are parameterized (not hardcoded) so Stage 8's
-    continuation loop can generate a FRESH batch of bids each cycle for
-    the same stock, rather than re-submitting the exact same 60 bids
-    (which would all get deduped and add nothing new to auction against).
-    """
-    print(f"=== Phase 1: ingesting bids for {stock_id} (cycle seed={seed}) ===")
-
-    # In production, replace this with real bids arriving from your
-    # platform's API/UI - this generator call is the one piece that's
-    # still test-only.
-    start_time = start_time or datetime(2026, 7, 8, 5, 0, 0)
-
-    # Real tick size + live price + market-hours check, from the broker
-    # adapter - hitting Finnhub's real API. FINNHUB_SYMBOL is the real
-    # ticker used purely as a live price reference; it's separate from
-    # stock_id, which is your own CRM/auction identifier.
-    FINNHUB_API_KEY = "d9biu5hr01qv2lms14bgd9biu5hr01qv2lms14c0"
-    STOCK_SYMBOL_MAP = {"AAPL_STOCK": "AAPL", "TSLA_STOCK": "TSLA", "MSFT_STOCK": "MSFT"}
-    FINNHUB_SYMBOL = STOCK_SYMBOL_MAP.get(stock_id, "AAPL")
-    bmd = BrokerMarketData(BrokerConfig(api_key=FINNHUB_API_KEY))
-    tick_size = bmd.get_instrument_meta(FINNHUB_SYMBOL)["tick_size"]
-    live_quote = bmd.get_reference_quote(FINNHUB_SYMBOL)
-
-    raw_bids = generate_random_bids(stock_id, n_bids=n_bids, seed=seed, start_time=start_time,
-                                     price_mean=live_quote["ltp"], price_std=live_quote["ltp"] * 0.003)
-
-    market_open = True  # TESTING ONLY - bypasses real Finnhub market-hours check
-    valid_bids = validate_bids(raw_bids, tick_size=tick_size, market_open=market_open)
-    print(f"{len(raw_bids)} generated -> {len(valid_bids)} passed validation "
-          f"(tick_size={tick_size}, market_open={market_open})")
-
-    client = BidIngestionClient(odoo_config, dry_run=dry_run)
-    result = client.register_batch(valid_bids)
-    print(f"Odoo ingestion summary: {result['summary']}\n")
-    return result
 
 
 def phase2_analyze(stock_id: str, ssm_odoo_config: SSMOdooConfig,
@@ -177,7 +136,7 @@ def phase4_promote_winners(stock_id: str, ssm_odoo_config: SSMOdooConfig,
 
 
 def phase5_settle_accounting(promotion_result: dict, ssm_odoo_config: SSMOdooConfig,
-                              dry_run: bool = True):
+                              dry_run: bool = True, to_email: str = None):
     """
     Invoice + post + register payment for each sale order Phase 4 just
     promoted. Reads sale_order_id straight from Phase 4's own results -
@@ -201,6 +160,8 @@ def phase5_settle_accounting(promotion_result: dict, ssm_odoo_config: SSMOdooCon
         print(f"  sale_order_id={r['sale_order_id']}: "
               f"invoice={settlement['invoice']['status']}, "
               f"payment={settlement['payment']['status'] if settlement['payment'] else 'skipped'}")
+        if settlement["invoice"]["status"] == "posted" and to_email and not dry_run:
+            send_invoice_pdf_email(ssm_odoo_config, settlement["invoice"]["invoice_id"], to_email)
         if settlement["invoice"]["status"] == "error":
             print(f"    invoice error: {settlement['invoice']['error']}")
         if settlement["payment"] and settlement["payment"]["status"] == "error":
@@ -257,6 +218,65 @@ def phase8_inventory_decision(state) -> str:
         return "move_to_next_stock"
 
 
+def _fetch_invoice_pdf(config: OdooConfig, invoice_id: int) -> bytes:
+    """Fetches the rendered invoice PDF over plain HTTP, using a real web
+    session (cookie-based login) - ir.actions.report._render_qweb_pdf is a
+    private method and Odoo 19 blocks calling it over XML-RPC, and there's
+    no public XML-RPC equivalent, so the report controller is the only
+    remaining route."""
+    import json
+    import urllib.request
+    import http.cookiejar
+
+    cookie_jar = http.cookiejar.CookieJar()
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
+
+    auth_payload = json.dumps({
+        "jsonrpc": "2.0", "method": "call",
+        "params": {"db": config.db, "login": config.username, "password": config.api_key},
+    }).encode()
+    auth_req = urllib.request.Request(
+        f"{config.url}/web/session/authenticate", data=auth_payload,
+        headers={"Content-Type": "application/json"},
+    )
+    opener.open(auth_req).read()  # populates cookie_jar with the session cookie
+
+    pdf_req = urllib.request.Request(f"{config.url}/report/pdf/account.report_invoice/{invoice_id}")
+    return opener.open(pdf_req).read()
+
+
+def send_invoice_pdf_email(config: OdooConfig, invoice_id: int, to_email: str):
+    """Renders the actual invoice PDF via Odoo's report engine and emails
+    it as an attachment - not just a text notification."""
+    common = xmlrpc.client.ServerProxy(f"{config.url}/xmlrpc/2/common")
+    uid = common.authenticate(config.db, config.username, config.api_key, {})
+    models = xmlrpc.client.ServerProxy(f"{config.url}/xmlrpc/2/object")
+
+    pdf_bytes = _fetch_invoice_pdf(config, invoice_id)
+
+    attachment_id = models.execute_kw(config.db, uid, config.api_key, "ir.attachment", "create", [{
+        "name": f"Invoice_{invoice_id}.pdf",
+        "type": "binary",
+        "datas": base64.b64encode(pdf_bytes).decode(),
+        "res_model": "account.move",
+        "res_id": invoice_id,
+        "mimetype": "application/pdf",
+    }])
+
+    mail_id = models.execute_kw(config.db, uid, config.api_key, "mail.mail", "create", [{
+        "subject": f"Invoice #{invoice_id}",
+        "body_html": "Please find your invoice attached.",
+        "email_to": to_email,
+        "attachment_ids": [(6, 0, [attachment_id])],
+    }])
+    try:
+        models.execute_kw(config.db, uid, config.api_key, "mail.mail", "send", [[mail_id]])
+    except xmlrpc.client.Fault as e:
+        if "cannot marshal None" not in str(e):
+            raise
+    print(f"  Invoice PDF for invoice_id={invoice_id} emailed to {to_email}.")
+
+
 def send_completion_email(config: OdooConfig, to_email: str, invoiced_count: int, stock_queue: list):
     """Sends a plain confirmation email via Odoo's own outgoing mail server
     (mail.mail) once the whole pipeline run is done."""
@@ -270,7 +290,13 @@ def send_completion_email(config: OdooConfig, to_email: str, invoiced_count: int
         "body_html": body,
         "email_to": to_email,
     }])
-    models.execute_kw(config.db, uid, config.api_key, "mail.mail", "send", [[mail_id]])
+    try:
+        models.execute_kw(config.db, uid, config.api_key, "mail.mail", "send", [[mail_id]])
+    except xmlrpc.client.Fault as e:
+        if "cannot marshal None" not in str(e):
+            raise
+        # send() succeeded server-side; only the RPC response (None) failed
+        # to serialize back - safe to ignore.
     print(f"\nCompletion email sent to {to_email}.")
 
 
@@ -295,7 +321,10 @@ if __name__ == "__main__":
     odoo_config = OdooConfig(url=url, db=db, username=username, api_key=api_key)
     ssm_odoo_config = SSMOdooConfig(url=url, db=db, username=username, api_key=api_key)
 
-    ASK_PRICE = 45.02          # still a placeholder - see broker_market_data.py
+    FINNHUB_API_KEY = "d9biu5hr01qv2lms14bgd9biu5hr01qv2lms14c0"
+    STOCK_SYMBOL_MAP = {"AAPL_STOCK": "AAPL", "TSLA_STOCK": "TSLA", "MSFT_STOCK": "MSFT"}
+    bmd = BrokerMarketData(BrokerConfig(api_key=FINNHUB_API_KEY))
+    FALLBACK_ASK_PRICE = 150.00  # used only if the week-average call fails
     TOTAL_COMMITTED = 1000     # blanket order size per stock, for this demo
     MAX_CYCLES_PER_STOCK = 5   # safety cap so a stock with no clearing bids
                                # doesn't loop forever
@@ -306,13 +335,23 @@ if __name__ == "__main__":
     for stock_id in stock_queue:
         print(f"\n{'#'*70}\n# STARTING STOCK: {stock_id}\n{'#'*70}\n")
 
+        symbol = STOCK_SYMBOL_MAP.get(stock_id, "AAPL")
+        try:
+            ASK_PRICE = bmd.get_week_average_price(symbol)
+            print(f"Ask price for {stock_id}: {ASK_PRICE:.2f} "
+                  f"(7-day average close for {symbol})")
+        except Exception as e:
+            ASK_PRICE = FALLBACK_ASK_PRICE
+            print(f"Could not fetch week-average price for {symbol} ({e}) - "
+                  f"falling back to placeholder {ASK_PRICE}")
+
         for cycle in range(1, MAX_CYCLES_PER_STOCK + 1):
             print(f"--- cycle {cycle} for {stock_id} ---")
 
-            # Stage 1: ingest a fresh batch of bids this cycle (new seed
-            # each time so it's not the same 60 bids re-submitted)
-            phase1_ingest(stock_id, odoo_config, dry_run=False,
-                          seed=cycle, start_time=datetime(2026, 7, 8, 5, cycle, 0))
+            # Stage 1 (ingestion) now happens externally via bid_api.py -
+            # real clients submit bids there and they land straight in
+            # Odoo CRM. This loop starts from Stage 2, reading whatever's
+            # already been ingested for this stock_id so far.
 
             # Stage 2: SSM analysis (informational - doesn't affect the
             # winner decision below)
@@ -349,7 +388,7 @@ if __name__ == "__main__":
             promotion_result = phase4_promote_winners(
                 stock_id, ssm_odoo_config, result["winners"], dry_run=False
             )
-            phase5_settle_accounting(promotion_result, ssm_odoo_config, dry_run=False)
+            phase5_settle_accounting(promotion_result, ssm_odoo_config, dry_run=False, to_email=RECIPIENT_EMAIL)
             invoiced_count += sum(1 for r in promotion_result["results"] if r["status"] == "promoted")
             state = phase6_update_blanket_order(
                 stock_id, result["winners"], total_committed=TOTAL_COMMITTED

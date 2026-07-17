@@ -1,51 +1,76 @@
 """
-Test-data generator for exercising bid_ingestion.py without real client
-traffic. NOT used by any production path - real bids arrive with real
-identity already attached from your platform's own client sessions
-(a logged-in user submitting a bid through your app/API), constructed
-directly as bid_ingestion.RawBid there. This file exists purely so the
-pipeline can be tested end-to-end before real client integration exists.
+Real client bid intake - the actual replacement for Test_bid_generation.py.
+A logged-in client's frontend/app calls POST /bids with their real bid;
+this constructs a RawBid exactly like the test generator did, but from a
+real HTTP request instead of random numbers.
+
+Run:
+    pip install flask --break-system-packages
+    py bid_api.py <odoo_url> <odoo_db> <odoo_username> <odoo_api_key>
+
+Client-side usage:
+    POST /bids
+    {
+      "buyer": "Acme Capital",
+      "stock_id": "AAPL_STOCK",
+      "price": 185.40,
+      "quantity": 300
+    }
+
+buyer identity should really come from your own auth/session layer
+(e.g. the logged-in user's name/id), not a free-text field a client can
+fake - swap request.json["buyer"] for your session's real user identity
+once you have real auth wired up.
 """
 
-import random
-from datetime import datetime, timedelta
-from typing import List, Optional
+import sys
+from datetime import datetime
 
-from bid_ingestion import RawBid
+from flask import Flask, request, jsonify
 
+from bid_ingestion import RawBid, validate_bids, BidIngestionClient, OdooConfig
+from finnhub_market_data import BrokerMarketData, BrokerConfig
 
-# A small pool of synthetic-but-named "clients", so test output is legible.
-# Swap this file out entirely once real client bids are flowing - there is
-# no equivalent of this pool in production; real buyer identity comes from
-# your own platform's authenticated users, not a generated list.
-DEFAULT_BUYER_POOL = [
-    "Acme Capital", "Blue Harbor Trading", "Cedar Ridge Partners",
-    "Delta Nine Fund", "Everest Asset Mgmt", "Fenwick & Co",
-    "Granite Peak Trading", "Halcyon Markets", "Ironwood Capital",
-    "Juniper Trading Desk",
-]
+app = Flask(__name__)
+
+FINNHUB_API_KEY = "d9biu5hr01qv2lms14bgd9biu5hr01qv2lms14c0"
+STOCK_SYMBOL_MAP = {"AAPL_STOCK": "AAPL", "TSLA_STOCK": "TSLA", "MSFT_STOCK": "MSFT"}
+bmd = BrokerMarketData(BrokerConfig(api_key=FINNHUB_API_KEY))
 
 
-def generate_random_bids(stock_id: str,
-                          n_bids: int,
-                          start_time: Optional[datetime] = None,
-                          avg_interarrival_seconds: float = 4.0,
-                          price_mean: float = 45.00,
-                          price_std: float = 0.15,
-                          qty_range=(50, 500),
-                          buyer_pool: List[str] = None,
-                          seed: Optional[int] = None) -> List[RawBid]:
-    """Poisson-arrival random bid stream for one stock - test data only."""
-    rng = random.Random(seed)
-    buyer_pool = buyer_pool or DEFAULT_BUYER_POOL
-    t = start_time or datetime.now()
+@app.route("/bids", methods=["POST"])
+def submit_bid():
+    data = request.get_json(force=True)
+    try:
+        bid = RawBid(
+            buyer=str(data["buyer"]),
+            stock_id=str(data["stock_id"]),
+            price=float(data["price"]),
+            quantity=float(data["quantity"]),
+            timestamp=datetime.now(),
+        )
+    except (KeyError, ValueError) as e:
+        return jsonify({"status": "error", "error": f"invalid bid payload: {e}"}), 400
 
-    bids = []
-    for _ in range(n_bids):
-        t += timedelta(seconds=rng.expovariate(1.0 / avg_interarrival_seconds))
-        price = rng.gauss(price_mean, price_std)
-        qty = round(rng.uniform(*qty_range))
-        buyer = rng.choice(buyer_pool)
-        bids.append(RawBid(buyer=buyer, stock_id=stock_id, price=price,
-                            quantity=qty, timestamp=t))
-    return bids
+    symbol = STOCK_SYMBOL_MAP.get(bid.stock_id, "AAPL")
+    tick_size = bmd.get_instrument_meta(symbol)["tick_size"]
+    market_open = bmd.is_market_open("US")
+
+    valid_bids = validate_bids([bid], tick_size=tick_size, market_open=True)
+    if not valid_bids:
+        return jsonify({"status": "rejected", "reason": "failed tick-size/market-hours validation"}), 422
+
+    result = ingestion_client.register_bid(valid_bids[0])
+    return jsonify(result), (201 if result["status"] == "created" else 200)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 5:
+        print("Usage: py bid_api.py <odoo_url> <odoo_db> <odoo_username> <odoo_api_key>")
+        sys.exit(1)
+
+    url, db, username, api_key = sys.argv[1:5]
+    ingestion_client = BidIngestionClient(
+        OdooConfig(url=url, db=db, username=username, api_key=api_key), dry_run=False
+    )
+    app.run(host="0.0.0.0", port=5001)

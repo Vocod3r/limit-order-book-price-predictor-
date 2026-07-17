@@ -34,5 +34,131 @@
         "timestamp": "2026-07-15T10:06:13.336767"
       }
     ]
+  },
+  "AAPL_STOCK": {
+    "price": 250.0,
+    "qty": 500.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 250.0,
+        "quantity": 500.0,
+        "resulting_best_ask": 250.0,
+        "resulting_qty": 500.0,
+        "timestamp": "2026-07-17T10:53:56.132911"
+      }
+    ]
+  },
+  "TSLA_STOCK": {
+    "price": 315.0,
+    "qty": 500.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 315.0,
+        "quantity": 500.0,
+        "resulting_best_ask": 315.0,
+        "resulting_qty": 500.0,
+        "timestamp": "2026-07-17T10:53:56.353646"
+      }
+    ]
+  },
+  "MSFT_STOCK": {
+    "price": 440.0,
+    "qty": 500.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 440.0,
+        "quantity": 500.0,
+        "resulting_best_ask": 440.0,
+        "resulting_qty": 500.0,
+        "timestamp": "2026-07-17T10:53:56.580020"
+      }
+    ]
+  },
+  "AAPL_STOCK_v3": {
+    "price": 250.0,
+    "qty": 1000.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 250.0,
+        "quantity": 1000.0,
+        "resulting_best_ask": 250.0,
+        "resulting_qty": 1000.0,
+        "timestamp": "2026-07-17T11:28:59.309077"
+      }
+    ]
+  },
+  "TSLA_STOCK_v3": {
+    "price": 315.0,
+    "qty": 1000.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 315.0,
+        "quantity": 1000.0,
+        "resulting_best_ask": 315.0,
+        "resulting_qty": 1000.0,
+        "timestamp": "2026-07-17T11:28:59.508723"
+      }
+    ]
+  },
+  "MSFT_STOCK_v3": {
+    "price": 440.0,
+    "qty": 1000.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 440.0,
+        "quantity": 1000.0,
+        "resulting_best_ask": 440.0,
+        "resulting_qty": 1000.0,
+        "timestamp": "2026-07-17T11:28:59.714453"
+      }
+    ]
+  },
+  "AAPL_STOCK_v4": {
+    "price": 250.0,
+    "qty": 1000.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 250.0,
+        "quantity": 1000.0,
+        "resulting_best_ask": 250.0,
+        "resulting_qty": 1000.0,
+        "timestamp": "2026-07-17T11:45:55.357633"
+      }
+    ]
+  },
+  "TSLA_STOCK_v4": {
+    "price": 315.0,
+    "qty": 1000.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 315.0,
+        "quantity": 1000.0,
+        "resulting_best_ask": 315.0,
+        "resulting_qty": 1000.0,
+        "timestamp": "2026-07-17T11:45:55.582573"
+      }
+    ]
+  },
+  "MSFT_STOCK_v4": {
+    "price": 440.0,
+    "qty": 1000.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 440.0,
+        "quantity": 1000.0,
+        "resulting_best_ask": 440.0,
+        "resulting_qty": 1000.0,
+        "timestamp": "2026-07-17T11:45:55.808132"
+      }
+    ]
   }
 }
