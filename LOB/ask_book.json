@@ -46,6 +46,22 @@
         "resulting_best_ask": 250.0,
         "resulting_qty": 500.0,
         "timestamp": "2026-07-17T10:53:56.132911"
+      },
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 350.0,
+        "quantity": 100.0,
+        "resulting_best_ask": 250.0,
+        "resulting_qty": 500.0,
+        "timestamp": "2026-07-17T14:44:38.690807"
+      },
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 349.99,
+        "quantity": 500.0,
+        "resulting_best_ask": 250.0,
+        "resulting_qty": 500.0,
+        "timestamp": "2026-07-17T14:45:06.840937"
       }
     ]
   },
@@ -158,6 +174,34 @@
         "resulting_best_ask": 440.0,
         "resulting_qty": 1000.0,
         "timestamp": "2026-07-17T11:45:55.808132"
+      }
+    ]
+  },
+  "TEST_STOCK_1": {
+    "price": 100.0,
+    "qty": 500.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 100.0,
+        "quantity": 500.0,
+        "resulting_best_ask": 100.0,
+        "resulting_qty": 500.0,
+        "timestamp": "2026-07-17T14:24:06.097936"
+      }
+    ]
+  },
+  "TEST_STOCK_2": {
+    "price": 100.0,
+    "qty": 500.0,
+    "events": [
+      {
+        "event_type": "new_sell_limit_order",
+        "price": 100.0,
+        "quantity": 500.0,
+        "resulting_best_ask": 100.0,
+        "resulting_qty": 500.0,
+        "timestamp": "2026-07-17T14:32:47.416977"
       }
     ]
   }

@@ -44,7 +44,6 @@ automating; run settle_existing.py by hand once that's sorted out.
                       in the queue.
 """
 
-import base64
 import xmlrpc.client
 from datetime import datetime
 
@@ -218,63 +217,26 @@ def phase8_inventory_decision(state) -> str:
         return "move_to_next_stock"
 
 
-def _fetch_invoice_pdf(config: OdooConfig, invoice_id: int) -> bytes:
-    """Fetches the rendered invoice PDF over plain HTTP, using a real web
-    session (cookie-based login) - ir.actions.report._render_qweb_pdf is a
-    private method and Odoo 19 blocks calling it over XML-RPC, and there's
-    no public XML-RPC equivalent, so the report controller is the only
-    remaining route."""
-    import json
-    import urllib.request
-    import http.cookiejar
-
-    cookie_jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-
-    auth_payload = json.dumps({
-        "jsonrpc": "2.0", "method": "call",
-        "params": {"db": config.db, "login": config.username, "password": config.api_key},
-    }).encode()
-    auth_req = urllib.request.Request(
-        f"{config.url}/web/session/authenticate", data=auth_payload,
-        headers={"Content-Type": "application/json"},
-    )
-    opener.open(auth_req).read()  # populates cookie_jar with the session cookie
-
-    pdf_req = urllib.request.Request(f"{config.url}/report/pdf/account.report_invoice/{invoice_id}")
-    return opener.open(pdf_req).read()
-
-
 def send_invoice_pdf_email(config: OdooConfig, invoice_id: int, to_email: str):
-    """Renders the actual invoice PDF via Odoo's report engine and emails
-    it as an attachment - not just a text notification."""
+    """Emails a direct link to the posted invoice in Odoo, instead of a
+    PDF attachment - simpler and doesn't depend on Odoo's report-rendering
+    controller behaving a specific way across versions."""
     common = xmlrpc.client.ServerProxy(f"{config.url}/xmlrpc/2/common")
     uid = common.authenticate(config.db, config.username, config.api_key, {})
     models = xmlrpc.client.ServerProxy(f"{config.url}/xmlrpc/2/object")
 
-    pdf_bytes = _fetch_invoice_pdf(config, invoice_id)
-
-    attachment_id = models.execute_kw(config.db, uid, config.api_key, "ir.attachment", "create", [{
-        "name": f"Invoice_{invoice_id}.pdf",
-        "type": "binary",
-        "datas": base64.b64encode(pdf_bytes).decode(),
-        "res_model": "account.move",
-        "res_id": invoice_id,
-        "mimetype": "application/pdf",
-    }])
-
+    invoice_url = f"{config.url}/web#id={invoice_id}&model=account.move&view_type=form"
     mail_id = models.execute_kw(config.db, uid, config.api_key, "mail.mail", "create", [{
         "subject": f"Invoice #{invoice_id}",
-        "body_html": "Please find your invoice attached.",
+        "body_html": f'Your invoice is ready: <a href="{invoice_url}">{invoice_url}</a>',
         "email_to": to_email,
-        "attachment_ids": [(6, 0, [attachment_id])],
     }])
     try:
         models.execute_kw(config.db, uid, config.api_key, "mail.mail", "send", [[mail_id]])
     except xmlrpc.client.Fault as e:
         if "cannot marshal None" not in str(e):
             raise
-    print(f"  Invoice PDF for invoice_id={invoice_id} emailed to {to_email}.")
+    print(f"  Invoice link for invoice_id={invoice_id} emailed to {to_email}.")
 
 
 def send_completion_email(config: OdooConfig, to_email: str, invoiced_count: int, stock_queue: list):

@@ -46,5 +46,13 @@
   "MSFT_STOCK_v4": {
     "total_committed": 1000,
     "shares_sold": 1000.0
+  },
+  "TEST_STOCK_1": {
+    "total_committed": 1000,
+    "shares_sold": 100.0
+  },
+  "TEST_STOCK_2": {
+    "total_committed": 1000,
+    "shares_sold": 200.0
   }
 }
