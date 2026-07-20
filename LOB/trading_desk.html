@@ -24,30 +24,125 @@
     color: var(--ink);
     font-family: 'JetBrains Mono', monospace;
     min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 32px 16px;
-  }
-  .desk {
-    width: 100%;
-    max-width: 480px;
   }
   .ticker {
-    font-family: 'JetBrains Mono', monospace;
     font-size: 11px;
     letter-spacing: 0.15em;
     color: var(--amber);
     text-transform: uppercase;
-    margin-bottom: 8px;
   }
   h1 {
     font-family: 'Fraunces', serif;
     font-weight: 600;
-    font-size: 32px;
-    margin: 0 0 28px 0;
+    font-size: 28px;
+    margin: 4px 0 0 0;
     letter-spacing: -0.01em;
   }
+  input {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 12px;
+    color: var(--ink);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 15px;
+  }
+  input:focus { outline: none; border-color: var(--amber); }
+  label {
+    display: block;
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin: 16px 0 6px 0;
+  }
+  label:first-of-type { margin-top: 0; }
+  button {
+    font-family: 'JetBrains Mono', monospace;
+    cursor: pointer;
+  }
+  .btn-primary {
+    width: 100%;
+    padding: 14px;
+    border: none;
+    border-radius: 6px;
+    background: var(--amber);
+    color: #16130a;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-primary:disabled { opacity: 0.5; cursor: default; }
+  .btn-link {
+    background: none;
+    border: none;
+    color: var(--dim);
+    font-size: 12px;
+    text-decoration: underline;
+    padding: 0;
+  }
+  .btn-link:hover { color: var(--ink); }
+
+  /* ---- Auth view ---- */
+  #view-auth {
+    max-width: 400px;
+    margin: 80px auto;
+    padding: 0 16px;
+  }
+  #view-auth .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 24px;
+    margin-top: 24px;
+  }
+  .auth-switch { margin-top: 14px; text-align: center; }
+  .auth-error { color: var(--red); font-size: 12px; margin-top: 10px; display: none; }
+  .auth-error.show { display: block; }
+
+  /* ---- Listings view ---- */
+  #view-listings { display: none; max-width: 900px; margin: 0 auto; padding: 32px 16px; }
+  .topbar { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 28px; }
+  .topbar .who { font-size: 12px; color: var(--dim); text-align: right; }
+  .topbar .who .name { color: var(--amber); }
+  .actions-row { display: flex; gap: 10px; margin-bottom: 20px; }
+  .actions-row button {
+    padding: 10px 16px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--ink);
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .actions-row button:hover { border-color: var(--amber); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 18px;
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .card:hover { border-color: var(--amber); }
+  .card .stock { font-family: 'Fraunces', serif; font-size: 19px; font-weight: 600; margin-bottom: 10px; }
+  .card .row { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); margin-top: 4px; }
+  .card .row .val { color: var(--ink); }
+  .empty { color: var(--dim); font-size: 13px; padding: 40px 0; text-align: center; }
+
+  /* ---- Detail / bid-sell view ---- */
+  #view-detail { display: none; max-width: 480px; margin: 0 auto; padding: 32px 16px; }
+  .back-link { color: var(--dim); font-size: 12px; margin-bottom: 16px; display: inline-block; cursor: pointer; }
+  .back-link:hover { color: var(--ink); }
   .toggle {
     display: flex;
     border: 1px solid var(--line);
@@ -61,61 +156,12 @@
     background: var(--panel);
     color: var(--dim);
     border: none;
-    font-family: 'JetBrains Mono', monospace;
     font-size: 13px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
   }
   .toggle button.active { background: var(--amber); color: #16130a; font-weight: 700; }
-  .toggle button:not(.active):hover { color: var(--ink); }
-
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 24px;
-  }
-  label {
-    display: block;
-    font-size: 11px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--dim);
-    margin: 16px 0 6px 0;
-  }
-  label:first-of-type { margin-top: 0; }
-  input {
-    width: 100%;
-    background: var(--bg);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 12px;
-    color: var(--ink);
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 15px;
-  }
-  input:focus { outline: none; border-color: var(--amber); }
-
-  .submit {
-    width: 100%;
-    margin-top: 22px;
-    padding: 14px;
-    border: none;
-    border-radius: 6px;
-    background: var(--amber);
-    color: #16130a;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    cursor: pointer;
-  }
-  .submit:hover { filter: brightness(1.08); }
-  .submit:disabled { opacity: 0.5; cursor: default; }
-
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 24px; }
   .result {
     margin-top: 20px;
     padding: 16px;
@@ -126,13 +172,7 @@
     display: none;
   }
   .result.show { display: block; }
-  .result .status-line {
-    font-size: 12px;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    font-weight: 700;
-    margin-bottom: 6px;
-  }
+  .result .status-line { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; margin-bottom: 6px; }
   .result.win { border-color: var(--green); }
   .result.win .status-line { color: var(--green); }
   .result.outbid { border-color: var(--red); }
@@ -143,21 +183,52 @@
 </style>
 </head>
 <body>
-<div class="desk">
+
+<div id="view-auth">
   <div class="ticker">Auction Pipeline</div>
   <h1>Trading Desk</h1>
+  <div class="panel">
+    <label>Username</label>
+    <input id="auth-username" autocomplete="off">
+    <label>Password</label>
+    <input id="auth-password" type="password">
+    <button class="btn-primary" style="margin-top:22px" id="auth-btn" onclick="doAuth()">Log In</button>
+    <div class="auth-error" id="auth-error"></div>
+    <div class="auth-switch">
+      <button class="btn-link" id="auth-switch-btn" onclick="toggleAuthMode()">New here? Create an account</button>
+    </div>
+  </div>
+</div>
+
+<div id="view-listings">
+  <div class="topbar">
+    <div>
+      <div class="ticker">Auction Pipeline</div>
+      <h1>Active Auctions</h1>
+    </div>
+    <div class="who">
+      Logged in as <span class="name" id="who-name"></span><br>
+      <button class="btn-link" onclick="doLogout()">Log out</button>
+    </div>
+  </div>
+  <div class="actions-row">
+    <button onclick="refreshListings()">Refresh</button>
+    <button onclick="showDetail(null)">+ List a stock (sell)</button>
+  </div>
+  <div class="grid" id="listings-grid"></div>
+</div>
+
+<div id="view-detail">
+  <span class="back-link" onclick="showListings()">&larr; Back to auctions</span>
 
   <div class="toggle">
-    <button id="btn-buyer" class="active" onclick="setRole('buyer')">Buyer</button>
-    <button id="btn-seller" onclick="setRole('seller')">Seller</button>
+    <button id="btn-buyer" class="active" onclick="setRole('buyer')">Buy</button>
+    <button id="btn-seller" onclick="setRole('seller')">Sell</button>
   </div>
 
   <div class="panel">
     <label>Stock</label>
     <input id="stock_id" placeholder="AAPL_STOCK" autocomplete="off">
-
-    <label>Your Name</label>
-    <input id="party_name" placeholder="Acme Capital" autocomplete="off">
 
     <label id="price-label">Bid Price</label>
     <input id="price" type="number" step="0.01" placeholder="254.30">
@@ -165,7 +236,7 @@
     <label>Quantity</label>
     <input id="quantity" type="number" step="1" placeholder="200">
 
-    <button class="submit" id="submit-btn" onclick="submitOrder()">Submit Bid</button>
+    <button class="btn-primary" style="margin-top:22px" id="submit-btn" onclick="submitOrder()">Submit Bid</button>
 
     <div class="result" id="result">
       <div class="status-line" id="result-status"></div>
@@ -176,6 +247,114 @@
 
 <script>
 let role = 'buyer';
+let authMode = 'login';
+let currentUser = null;
+
+async function checkSession() {
+  const res = await fetch('/me');
+  if (res.ok) {
+    const data = await res.json();
+    currentUser = data.username;
+    showListings();
+  } else {
+    showAuth();
+  }
+}
+
+function showAuth() {
+  document.getElementById('view-auth').style.display = 'block';
+  document.getElementById('view-listings').style.display = 'none';
+  document.getElementById('view-detail').style.display = 'none';
+}
+
+function showListings() {
+  document.getElementById('view-auth').style.display = 'none';
+  document.getElementById('view-listings').style.display = 'block';
+  document.getElementById('view-detail').style.display = 'none';
+  document.getElementById('who-name').textContent = currentUser;
+  refreshListings();
+}
+
+function showDetail(stockId) {
+  document.getElementById('view-auth').style.display = 'none';
+  document.getElementById('view-listings').style.display = 'none';
+  document.getElementById('view-detail').style.display = 'block';
+  document.getElementById('result').classList.remove('show', 'win', 'outbid', 'seller');
+  document.getElementById('stock_id').value = stockId || '';
+  document.getElementById('price').value = '';
+  document.getElementById('quantity').value = '';
+  setRole(stockId ? 'buyer' : 'seller');
+}
+
+function toggleAuthMode() {
+  authMode = authMode === 'login' ? 'register' : 'login';
+  document.getElementById('auth-btn').textContent = authMode === 'login' ? 'Log In' : 'Create Account';
+  document.getElementById('auth-switch-btn').textContent =
+    authMode === 'login' ? 'New here? Create an account' : 'Already have an account? Log in';
+  document.getElementById('auth-error').classList.remove('show');
+}
+
+async function doAuth() {
+  const username = document.getElementById('auth-username').value.trim();
+  const password = document.getElementById('auth-password').value;
+  const errEl = document.getElementById('auth-error');
+  errEl.classList.remove('show');
+
+  if (!username || !password) {
+    errEl.textContent = 'Enter a username and password.';
+    errEl.classList.add('show');
+    return;
+  }
+
+  const endpoint = authMode === 'login' ? '/login' : '/register';
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({username, password})
+  });
+  const data = await res.json();
+
+  if (!res.ok) {
+    errEl.textContent = data.error || 'Something went wrong.';
+    errEl.classList.add('show');
+    return;
+  }
+
+  currentUser = data.username;
+  showListings();
+}
+
+async function doLogout() {
+  await fetch('/logout', {method: 'POST'});
+  currentUser = null;
+  showAuth();
+}
+
+async function refreshListings() {
+  const grid = document.getElementById('listings-grid');
+  grid.innerHTML = '<div class="empty">Loading...</div>';
+  const res = await fetch('/listings');
+  const listings = await res.json();
+
+  if (!listings.length) {
+    grid.innerHTML = '<div class="empty">No active auctions yet. List a stock to get started.</div>';
+    return;
+  }
+
+  grid.innerHTML = '';
+  for (const l of listings) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.onclick = () => showDetail(l.stock_id);
+    card.innerHTML = `
+      <div class="stock">${l.stock_id}</div>
+      <div class="row"><span>Ask</span><span class="val">${l.ask_price.toFixed(2)}</span></div>
+      <div class="row"><span>Qty</span><span class="val">${l.ask_qty}</span></div>
+      <div class="row"><span>High bid</span><span class="val">${l.highest_bid !== null ? l.highest_bid.toFixed(2) : '—'}</span></div>
+    `;
+    grid.appendChild(card);
+  }
+}
 
 function setRole(r) {
   role = r;
@@ -183,12 +362,10 @@ function setRole(r) {
   document.getElementById('btn-seller').classList.toggle('active', r === 'seller');
   document.getElementById('price-label').textContent = r === 'buyer' ? 'Bid Price' : 'Ask Price';
   document.getElementById('submit-btn').textContent = r === 'buyer' ? 'Submit Bid' : 'Set Ask Price';
-  document.getElementById('result').classList.remove('show', 'win', 'outbid', 'seller');
 }
 
 async function submitOrder() {
   const stock_id = document.getElementById('stock_id').value.trim();
-  const party_name = document.getElementById('party_name').value.trim();
   const price = parseFloat(document.getElementById('price').value);
   const quantity = parseFloat(document.getElementById('quantity').value);
   const resultEl = document.getElementById('result');
@@ -196,10 +373,10 @@ async function submitOrder() {
   const detailEl = document.getElementById('result-detail');
   const btn = document.getElementById('submit-btn');
 
-  if (!stock_id || !party_name || isNaN(price) || isNaN(quantity)) {
+  if (!stock_id || isNaN(price) || isNaN(quantity)) {
     resultEl.className = 'result show outbid';
     statusEl.textContent = 'Missing fields';
-    detailEl.textContent = 'Fill in stock, name, price, and quantity before submitting.';
+    detailEl.textContent = 'Fill in stock, price, and quantity before submitting.';
     return;
   }
 
@@ -207,44 +384,30 @@ async function submitOrder() {
   btn.textContent = 'Submitting...';
 
   try {
-    if (role === 'buyer') {
-      const res = await fetch('/bids', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({buyer: party_name, stock_id, price, quantity})
-      });
-      const data = await res.json();
+    const endpoint = role === 'buyer' ? '/bids' : '/asks';
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({stock_id, price, quantity})
+    });
+    const data = await res.json();
 
-      if (!res.ok) {
-        resultEl.className = 'result show outbid';
-        statusEl.textContent = data.reason || data.error || 'Bid rejected';
-        detailEl.textContent = 'Check your price against tick size and try again.';
-      } else if (data.outbid) {
-        resultEl.className = 'result show outbid';
-        statusEl.textContent = 'You have been outbid';
-        detailEl.textContent = `Current highest bid for ${stock_id} is ${data.current_highest_bid.toFixed(2)}. Submit a higher bid to compete.`;
-      } else {
-        resultEl.className = 'result show win';
-        statusEl.textContent = 'Bid registered — currently leading';
-        detailEl.textContent = 'Payment in progress. A confirmation email will be sent once the auction settles.';
-      }
+    if (!res.ok) {
+      resultEl.className = 'result show outbid';
+      statusEl.textContent = data.reason || data.error || 'Rejected';
+      detailEl.textContent = role === 'buyer' ? 'Check your price against tick size and try again.' : '';
+    } else if (role === 'buyer' && data.outbid) {
+      resultEl.className = 'result show outbid';
+      statusEl.textContent = 'You have been outbid';
+      detailEl.textContent = `Current highest bid for ${stock_id} is ${data.current_highest_bid.toFixed(2)}. Submit a higher bid to compete.`;
+    } else if (role === 'buyer') {
+      resultEl.className = 'result show win';
+      statusEl.textContent = 'Bid registered — currently leading';
+      detailEl.textContent = 'Payment in progress. A confirmation email will be sent once the auction settles.';
     } else {
-      const res = await fetch('/asks', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({stock_id, price, quantity})
-      });
-      const data = await res.json();
-
-      if (!res.ok) {
-        resultEl.className = 'result show outbid';
-        statusEl.textContent = data.error || 'Ask rejected';
-        detailEl.textContent = '';
-      } else {
-        resultEl.className = 'result show seller';
-        statusEl.textContent = 'Ask price updated';
-        detailEl.textContent = `${stock_id} now asking ${data.resulting_best_ask.toFixed(2)} for ${data.resulting_qty} shares.`;
-      }
+      resultEl.className = 'result show seller';
+      statusEl.textContent = 'Ask price updated';
+      detailEl.textContent = `${stock_id} now asking ${data.resulting_best_ask.toFixed(2)} for ${data.resulting_qty} shares.`;
     }
   } catch (e) {
     resultEl.className = 'result show outbid';
@@ -255,6 +418,8 @@ async function submitOrder() {
   btn.disabled = false;
   btn.textContent = role === 'buyer' ? 'Submit Bid' : 'Set Ask Price';
 }
+
+checkSession();
 </script>
 </body>
 </html>

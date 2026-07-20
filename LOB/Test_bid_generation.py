@@ -46,6 +46,21 @@ def frontend():
     return send_from_directory(".", "trading_desk.html")
 
 
+@app.route("/listings")
+def listings():
+    """One card per stock currently sitting in the ask book - the
+    'browsable auctions' grid."""
+    out = []
+    for stock_id, entry in ask_book._data.items():
+        out.append({
+            "stock_id": stock_id,
+            "ask_price": entry["price"],
+            "ask_qty": entry["qty"],
+            "highest_bid": _highest_registered_bid(stock_id),
+        })
+    return jsonify(out)
+
+
 @app.route("/bids", methods=["POST"])
 def submit_bid():
     data = request.get_json(force=True)
@@ -129,4 +144,4 @@ if __name__ == "__main__":
     uid = common.authenticate(db, username, api_key, {})
     models_client = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
 
-    app.run(host="0.0.0.0", port=5001)
+    app.run(host="0.0.0.0", port=5051)

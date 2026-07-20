@@ -54,5 +54,9 @@
   "TEST_STOCK_2": {
     "total_committed": 1000,
     "shares_sold": 200.0
+  },
+  "EVENT_TEST_1": {
+    "total_committed": 1000,
+    "shares_sold": 300.0
   }
 }

@@ -50,7 +50,7 @@ from datetime import datetime
 from bid_ingestion import OdooConfig
 from finnhub_market_data import BrokerMarketData, BrokerConfig
 from LOB_ssm import (run_on_odoo_bids_and_asks, print_diagnostic_report,
-                       print_event_conditioned_prediction,
+                       print_event_conditioned_prediction, print_baseline_comparison,
                        find_highest_bid_from_odoo, OdooConfig as SSMOdooConfig)
 from ask_book import AskBook
 from promote_winners import WinnerPromotionClient
@@ -86,6 +86,7 @@ def phase2_analyze(stock_id: str, ssm_odoo_config: SSMOdooConfig,
     )
     print_diagnostic_report(stock_id, feature_rows)
     print_event_conditioned_prediction(stock_id, feature_rows)
+    print_baseline_comparison(stock_id, feature_rows)
     return feature_rows
 
 

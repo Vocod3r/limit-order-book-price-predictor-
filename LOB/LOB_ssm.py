@@ -560,6 +560,93 @@ def print_diagnostic_report(stock_id: str, feature_rows: List[Dict[str, float]])
     print(f"Latest mid price: {latest['mid_price']:.2f}  spread: {latest['spread']:.2f}\n")
 
 
+def evaluate_against_baseline(feature_rows: List[Dict[str, float]], test_size: float = 0.2):
+    """
+    Gould & Bonart (2015), Section 5.4: compares a fitted imbalance->
+    direction logistic regression against the paper's null model, which
+    assumes I carries no information (ŷ(I) = 0.5 for all I, always).
+
+    Reports the same two metrics the paper uses:
+      - area under the ROC curve (null model's expected value is exactly
+        0.5; a real model should exceed that)
+      - mean squared residual (null model's is provably exactly 0.25,
+        since every residual is ±0.5 regardless of the outcome)
+
+    Uses an 80/20 train/test split when there's enough data to support
+    one (paper uses the same split); falls back to in-sample reporting
+    with a stated caveat when there isn't, since evaluating a model
+    out-of-sample on that little data isn't meaningful.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import roc_auc_score
+
+    X, y = [], []
+    for i in range(len(feature_rows) - 1):
+        row = feature_rows[i]
+        next_row = feature_rows[i + 1]
+        event_fired = (row.get("event_ask_depleted") or row.get("event_new_higher_bid")
+                       or row.get("event_bid_depleted") or row.get("event_new_lower_ask"))
+        label = next_row.get("mid_price_label")
+        if event_fired and label is not None:
+            X.append([row["queue_imbalance"]])
+            y.append(label)
+
+    result = {"n_samples": len(y), "n_up": sum(y), "n_down": len(y) - sum(y)}
+
+    if len(y) < 5 or len(set(y)) < 2:
+        result["status"] = "insufficient_data"
+        return result
+
+    null_msr = 0.25  # provable constant for ŷ=0.5, see paper Eq. 20
+    null_auc = 0.5    # expected value for a model with no discriminative power
+
+    can_split = len(y) >= 10 and min(sum(y), len(y) - sum(y)) >= 2
+    if can_split:
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=test_size, random_state=0, stratify=y)
+        result["split"] = "out_of_sample"
+    else:
+        X_train, X_test, y_train, y_test = X, X, y, y
+        result["split"] = "in_sample (too little data for a held-out test set)"
+
+    model = LogisticRegression()
+    model.fit(X_train, y_train)
+    probs = model.predict_proba(X_test)[:, 1]
+
+    model_msr = sum((p - actual) ** 2 for p, actual in zip(probs, y_test)) / len(y_test)
+    try:
+        model_auc = roc_auc_score(y_test, probs)
+    except ValueError:
+        model_auc = None  # only one class present in the test split
+
+    result.update({
+        "status": "evaluated",
+        "model_auc": model_auc, "null_auc": null_auc,
+        "model_msr": model_msr, "null_msr": null_msr,
+        "msr_improvement_pct": (null_msr - model_msr) / null_msr * 100,
+    })
+    return result
+
+
+def print_baseline_comparison(stock_id: str, feature_rows: List[Dict[str, float]]):
+    print(f"=== Model vs. baseline (Gould & Bonart null model): {stock_id} ===")
+    r = evaluate_against_baseline(feature_rows)
+
+    if r["status"] == "insufficient_data":
+        print(f"Only {r['n_samples']} event-triggered tick(s) with both classes represented "
+              f"(need >=5) - not enough to evaluate yet.\n")
+        return r
+
+    print(f"Evaluated on {r['n_samples']} event-triggered tick(s) "
+          f"({r['n_up']} up, {r['n_down']} down), {r['split']}.")
+    auc_str = f"{r['model_auc']:.3f}" if r["model_auc"] is not None else "n/a (single class in test set)"
+    print(f"AUC-ROC:              model={auc_str}   null_baseline={r['null_auc']:.3f}")
+    print(f"Mean squared residual: model={r['model_msr']:.3f}   null_baseline={r['null_msr']:.3f}"
+          f"   ({r['msr_improvement_pct']:+.1f}% vs. baseline)\n")
+    return r
+
+
 def fit_event_conditioned_predictor(feature_rows: List[Dict[str, float]]):
     """
     Gould & Bonart (2015): fit a logistic regression of ONE-TICK-AHEAD
