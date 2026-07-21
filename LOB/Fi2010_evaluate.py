@@ -15,86 +15,52 @@ FI-2010 file layout (149 rows x N timesteps, each column = one event):
 Usage:
     py fi2010_evaluate.py <train_file> <test_file> [--horizon 0-4]
 
-AUTOSCALING: LOB_ssm.py's Kalman filter noise constants (R, Q, depletion
-bias) were tuned assuming real dollar prices / real share quantities.
-FI-2010's normalized values sit on a completely different scale, so
-those constants would badly miscalibrate the filter if used as-is. This
-script computes each file's actual price/quantity variance and rescales
-R/Q/depletion-bias proportionally before running the filter - applied
-only for the duration of this script (via monkey-patching LOB_ssm's
-module-level R and build_process_noise), never touching the live
-pipeline's own values.
+NO RESCALING: LOB_ssm.py's Kalman filter noise constants (R, Q, depletion
+bias) are used exactly as defined in LOB_ssm.py - tuned for real dollar
+prices / real share quantities, not adjusted for FI-2010's normalized
+scale. This is deliberate: run the filter as-is and take the results for
+what they are, rather than compensating for a scale mismatch with guessed
+reference constants.
 """
 
 import sys
-import math
 import numpy as np
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 
-import LOB_ssm
 from LOB_ssm import run_on_ticks
 
 ASK_PRICE_ROW, ASK_VOL_ROW, BID_PRICE_ROW, BID_VOL_ROW = 0, 1, 2, 3
 LABEL_ROWS_START = 144
 HORIZON_NAMES = ["k=10", "k=20", "k=30", "k=50", "k=100"]
 
-# The reference scale LOB_ssm.py's constants were originally tuned for -
-# real dollar prices (~$0.05 measurement noise std) and real share
-# quantities (~1 share measurement noise std, ~depleting over ~50 ticks
-# from a queue around a few hundred shares). Used only to compute a
-# RATIO for rescaling, not copied as-is.
-REFERENCE_QTY_VAR = 1.0
-REFERENCE_BASE_Q = 0.05
-REFERENCE_DEPLETION_Q = 2.0
-REFERENCE_DEPLETION_BIAS = -8.0
-R_NOISE_FRACTION = 0.05  # assume ~5% of raw variance is pure measurement noise
+
+def load_matrix(path: str) -> np.ndarray:
+    """Reads a FI-2010 file. Uses pandas' C-based whitespace parser when
+    available - substantially faster than np.loadtxt on large files
+    (np.loadtxt parses row-by-row in pure Python internally, which gets
+    very slow on 100MB+ files with tens of thousands of columns).
+    Falls back to np.loadtxt if pandas isn't installed."""
+    try:
+        import pandas as pd
+        return pd.read_csv(path, sep=r"\s+", header=None, engine="c").values
+    except ImportError:
+        return np.loadtxt(path)
 
 
-def autoscale_filter_constants(ticks):
-    """Computes this file's actual price/qty variance and monkey-patches
-    LOB_ssm.R and LOB_ssm.build_process_noise so the filter's noise
-    assumptions match THIS data's scale, not the live pipeline's
-    real-dollar assumptions. Returns the values it applied, for
-    transparency."""
-    prices = np.array([t["best_bid"] for t in ticks] + [t["best_ask"] for t in ticks])
-    qtys = np.array([t["bid_qty"] for t in ticks] + [t["ask_qty"] for t in ticks])
-    price_var = max(np.var(prices), 1e-9)
-    qty_var = max(np.var(qtys), 1e-9)
-
-    new_R = np.diag([price_var * R_NOISE_FRACTION, price_var * R_NOISE_FRACTION,
-                      qty_var * R_NOISE_FRACTION, qty_var * R_NOISE_FRACTION])
-
-    qty_ratio = qty_var / REFERENCE_QTY_VAR
-    new_base_q = REFERENCE_BASE_Q * qty_ratio
-    new_depletion_q = REFERENCE_DEPLETION_Q * qty_ratio
-    new_depletion_bias = REFERENCE_DEPLETION_BIAS * math.sqrt(qty_ratio)
-
-    LOB_ssm.R = new_R
-
-    def scaled_build_process_noise(regime, base_q=new_base_q,
-                                    depletion_q=new_depletion_q,
-                                    depletion_bias=new_depletion_bias):
-        return LOB_ssm._orig_build_process_noise(
-            regime, base_q=base_q, depletion_q=depletion_q, depletion_bias=depletion_bias)
-
-    if not hasattr(LOB_ssm, "_orig_build_process_noise"):
-        LOB_ssm._orig_build_process_noise = LOB_ssm.build_process_noise
-    LOB_ssm.build_process_noise = scaled_build_process_noise
-
-    return {"price_var": price_var, "qty_var": qty_var, "qty_ratio": qty_ratio,
-            "base_q": new_base_q, "depletion_q": new_depletion_q,
-            "depletion_bias": new_depletion_bias}
-
-
-def load_fold(path: str, horizon: int):
-    """Runs the FI-2010 level-1 sequence through the actual Kalman/IMM
-    filter (LOB_ssm.run_on_ticks), with R/Q autoscaled to this file's
-    real variance, then pairs the filtered queue_imbalance from each
-    tick with FI-2010's real label for that same tick. Rows where the
-    label is 'stationary' (2) are dropped, matching the paper's own
-    treatment of y (only defined when price actually moved)."""
-    data = np.loadtxt(path)
+def load_and_filter(path: str):
+    """The expensive, horizon-independent part of load_fold(): reads the
+    file once and runs the level-1 sequence through the actual Kalman/IMM
+    filter once - using LOB_ssm.py's own R and build_process_noise as-is,
+    no rescaling. Imbalance is computed with safe_imbalance() from the
+    filter's own bid_queue_size/ask_queue_size state, NOT LOB_ssm.py's
+    queue_imbalance field (which uses an a+b denominator that breaks on
+    Z-score normalized data - see safe_imbalance() docstring). Returns
+    (imbalance, label_matrix) where label_matrix is ALL 5 horizon label
+    rows (144-148), so callers that need multiple horizons for the same
+    file (e.g. the batch script) only pay the load+filter cost once
+    instead of once per horizon."""
+    data = load_matrix(path)
 
     ticks = [
         {"best_bid": data[BID_PRICE_ROW, i], "best_ask": data[ASK_PRICE_ROW, i],
@@ -102,22 +68,143 @@ def load_fold(path: str, horizon: int):
         for i in range(data.shape[1])
     ]
 
-    scale = autoscale_filter_constants(ticks)
-    print(f"  autoscaled: price_var={scale['price_var']:.4f} qty_var={scale['qty_var']:.4f} "
-          f"qty_ratio={scale['qty_ratio']:.4f} -> base_q={scale['base_q']:.4f} "
-          f"depletion_q={scale['depletion_q']:.4f} depletion_bias={scale['depletion_bias']:.4f}")
+    feature_rows = run_on_ticks(ticks)  # same Kalman/IMM pipeline as the live path,
+                                          # LOB_ssm.R / build_process_noise untouched
+    filtered_q_b = np.array([row["bid_queue_size"] for row in feature_rows])
+    filtered_q_a = np.array([row["ask_queue_size"] for row in feature_rows])
+    imbalance = safe_imbalance(filtered_q_b, filtered_q_a)
 
-    feature_rows = run_on_ticks(ticks)  # same Kalman/IMM pipeline as the live path
+    label_matrix = data[LABEL_ROWS_START:LABEL_ROWS_START + 5, 1:]
+    return imbalance, label_matrix
 
-    # run_on_ticks consumes tick[0] as the seed state, so feature_rows[i]
-    # corresponds to ticks[i+1] / data column (i+1) - align labels the same way
-    labels = data[LABEL_ROWS_START + horizon, 1:]
 
-    imbalance = np.array([row["queue_imbalance"] for row in feature_rows])
+def safe_imbalance(numerator_a: np.ndarray, numerator_b: np.ndarray) -> np.ndarray:
+    """Computes (a - b) / (|a| + |b| + eps) instead of the textbook
+    (a - b) / (a + b + eps).
+
+    Why: the textbook ratio assumes a, b >= 0 (real order-book queue
+    sizes always are). But Z-score normalized data centers volumes
+    around 0, so roughly half of a, b can be NEGATIVE - which makes
+    (a + b) flip sign or collapse toward zero, blowing the ratio up to
+    values in the hundreds or thousands (confirmed on this dataset: 57%
+    of ticks had a negative denominator, 34% of resulting ratios fell
+    outside the valid [-1, 1] range). Using |a| + |b| in the denominator
+    keeps it non-negative regardless of the sign of the inputs, so the
+    result stays properly bounded in [-1, 1] - a - b still correctly
+    reflects which side dominates and by how much."""
+    return (numerator_a - numerator_b) / (np.abs(numerator_a) + np.abs(numerator_b) + 1e-9)
+
+
+def load_and_filter_with_raw(path: str):
+    """Like load_and_filter(), but also returns the RAW (unfiltered)
+    imbalance ratio computed directly from the observed bid/ask
+    quantities - the same quantity LOB_ssm.run_on_ticks() feeds INTO the
+    filter, before any smoothing. This lets you isolate what the filter
+    actually changes, by comparing:
+
+      raw_imbalance       - what Gould & Bonart's own method uses directly
+      filtered_imbalance  - the Kalman/IMM-smoothed version
+      residual            - raw - filtered: the part of each observation
+                             the filter treated as noise and blended away
+
+    Both raw and filtered use safe_imbalance() (|a|+|b| denominator), NOT
+    LOB_ssm.py's own queue_imbalance field, which uses the textbook
+    a+b denominator and is therefore equally corrupted by Z-score's
+    negative values - LOB_ssm.py itself is left untouched, but its
+    bid_queue_size/ask_queue_size state (the filtered q_b, q_a) is pulled
+    out and the imbalance is recomputed safely here instead.
+
+    Returns (raw_imbalance, filtered_imbalance, residual, label_matrix),
+    all aligned to the same tick indices as load_and_filter()."""
+    data = load_matrix(path)
+
+    ticks = [
+        {"best_bid": data[BID_PRICE_ROW, i], "best_ask": data[ASK_PRICE_ROW, i],
+         "bid_qty": data[BID_VOL_ROW, i], "ask_qty": data[ASK_VOL_ROW, i]}
+        for i in range(data.shape[1])
+    ]
+
+    feature_rows = run_on_ticks(ticks)
+    filtered_q_b = np.array([row["bid_queue_size"] for row in feature_rows])
+    filtered_q_a = np.array([row["ask_queue_size"] for row in feature_rows])
+    filtered_imbalance = safe_imbalance(filtered_q_b, filtered_q_a)
+
+    bid_qty = np.array([t["bid_qty"] for t in ticks[1:]])
+    ask_qty = np.array([t["ask_qty"] for t in ticks[1:]])
+    raw_imbalance = safe_imbalance(bid_qty, ask_qty)
+
+    residual = raw_imbalance - filtered_imbalance
+
+    label_matrix = data[LABEL_ROWS_START:LABEL_ROWS_START + 5, 1:]
+    return raw_imbalance, filtered_imbalance, residual, label_matrix
+
+
+def load_diagnostics(path: str):
+    """Like load_and_filter_with_raw(), but also pulls the IMM's regime
+    probabilities (p_stable, p_bid_depleting, p_ask_depleting) per tick -
+    needed to check whether large residuals cluster around moments the
+    filter suspects a depletion event, i.e. whether 'what got filtered
+    out' concentrates around regime changes rather than being spread
+    uniformly. Uses safe_imbalance() throughout - see its docstring.
+    Returns a dict of aligned arrays."""
+    data = load_matrix(path)
+
+    ticks = [
+        {"best_bid": data[BID_PRICE_ROW, i], "best_ask": data[ASK_PRICE_ROW, i],
+         "bid_qty": data[BID_VOL_ROW, i], "ask_qty": data[ASK_VOL_ROW, i]}
+        for i in range(data.shape[1])
+    ]
+
+    feature_rows = run_on_ticks(ticks)
+    filtered_q_b = np.array([row["bid_queue_size"] for row in feature_rows])
+    filtered_q_a = np.array([row["ask_queue_size"] for row in feature_rows])
+    filtered_imbalance = safe_imbalance(filtered_q_b, filtered_q_a)
+    p_bid_depleting = np.array([row["p_bid_depleting"] for row in feature_rows])
+    p_ask_depleting = np.array([row["p_ask_depleting"] for row in feature_rows])
+    p_stable = np.array([row["p_stable"] for row in feature_rows])
+
+    bid_qty = np.array([t["bid_qty"] for t in ticks[1:]])
+    ask_qty = np.array([t["ask_qty"] for t in ticks[1:]])
+    raw_imbalance = safe_imbalance(bid_qty, ask_qty)
+
+    residual = raw_imbalance - filtered_imbalance
+    label_matrix = data[LABEL_ROWS_START:LABEL_ROWS_START + 5, 1:]
+
+    return {
+        "raw": raw_imbalance, "filtered": filtered_imbalance, "residual": residual,
+        "p_stable": p_stable, "p_bid_depleting": p_bid_depleting,
+        "p_ask_depleting": p_ask_depleting, "label_matrix": label_matrix,
+    }
+
+
+def labels_for_horizon(imbalance: np.ndarray, label_matrix: np.ndarray, horizon: int):
+    """The cheap, horizon-specific part: pick the label row for this
+    horizon, drop 'stationary' (2) ticks, and align with the imbalance
+    array. No file I/O or filtering here - safe to call once per horizon
+    on already-loaded/filtered data."""
+    labels = label_matrix[horizon]
     mask = labels != 2
     y = (labels[mask] == 1).astype(int)
     X = imbalance[mask].reshape(-1, 1)
     return X, y
+
+
+def load_fold(path: str, horizon: int):
+    """Runs the FI-2010 level-1 sequence through the actual Kalman/IMM
+    filter (LOB_ssm.run_on_ticks), using LOB_ssm.py's own R and
+    build_process_noise constants unmodified, then pairs the filtered
+    queue_imbalance from each tick with FI-2010's real label for that
+    same tick. Rows where the label is 'stationary' (2) are dropped,
+    matching the paper's own treatment of y (only defined when price
+    actually moved).
+
+    Kept for single-horizon / standalone use (this is what the CLI below
+    calls). If you need multiple horizons for the same file, call
+    load_and_filter() once and labels_for_horizon() per horizon instead -
+    that's what the batch script does, to avoid refiltering the same
+    file 5 times."""
+    imbalance, label_matrix = load_and_filter(path)
+    return labels_for_horizon(imbalance, label_matrix, horizon)
 
 
 def evaluate(train_path: str, test_path: str, horizon: int):

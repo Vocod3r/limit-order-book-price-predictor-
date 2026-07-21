@@ -1,50 +1,69 @@
 """
-Batch runner for fi2010_evaluate.py across all Train/Test fold pairs found
-in a directory - so you don't have to invoke the script by hand ~50 times.
+Batch runner across all Train/Test fold pairs found in a directory - so
+you don't have to invoke anything by hand ~50 times.
 
-Discovery rule: for every "Train_Dst_*.txt" file, looks for the matching
-"Test_Dst_*.txt" (same suffix, "Train" -> "Test"). Files without a match
-are skipped and reported at the end, not silently dropped.
+Discovery rule: recursively finds every "Train_Dst_*.txt" file anywhere
+under the given root, and matches each to its "Test_Dst_*.txt" counterpart
+(same filename, "Train"->"Test") found anywhere else under that root -
+handles layouts where Train/Test live in separate sibling folders (e.g.
+Auction_ZScore_Training/ and Auction_ZScore_Testing/).
 
-For each matched pair, runs all 5 horizons (k=10/20/30/50/100) through
-the same Kalman/IMM-filtered pipeline as fi2010_evaluate.py, and collects
-results into one summary table (printed + written to CSV), similar in
-spirit to the paper's Table 4/5 layout.
+PERFORMANCE: loads and Kalman/IMM-filters each file ONCE (via
+fi2010_evaluate.load_and_filter_with_raw), then reuses that cached result
+across all 5 horizons instead of re-reading and re-filtering the file
+from scratch per horizon - a ~5x speedup over calling load_fold() once
+per horizon.
+
+THREE-WAY COMPARISON: for every fold x horizon, fits and scores THREE
+separate logistic regressions:
+  raw       - unfiltered imbalance ratio, straight from observed
+              quantities (this is what Gould & Bonart (2015) use)
+  filtered  - the Kalman/IMM-smoothed imbalance
+  residual  - raw - filtered (the part of each observation the filter
+              treated as noise and blended away)
+This directly answers "is the filter helping or hurting", across every
+fold, instead of eyeballing one file at a time.
+
+NO RESCALING: uses LOB_ssm.py's own R / build_process_noise constants as
+defined, unmodified - see fi2010_evaluate.py.
+
+SAFETY: writes each result row to the CSV immediately as it completes,
+so if you stop the script partway through, or it crashes, everything
+computed so far is already saved to disk.
 
 Usage:
     py fi2010_batch.py <directory> [--out results.csv]
 
 Example:
-    py fi2010_batch.py C:\\path\\to\\fi2010_files --out summary.csv
+    py fi2010_batch.py C:\\path\\to\\Auction --out summary.csv
 """
 
 import sys
 import glob
 import os
 import csv
+import time
 
-from Fi2010_evaluate import load_fold, HORIZON_NAMES
+from Fi2010_evaluate import load_and_filter_with_raw, labels_for_horizon, HORIZON_NAMES
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 import numpy as np
 
+SIGNALS = ["raw", "filtered", "residual"]
+FIELDNAMES = ["fold", "horizon", "status", "train_n", "test_n"]
+for _s in SIGNALS:
+    FIELDNAMES += [f"{_s}_auc", f"{_s}_msr", f"{_s}_x0", f"{_s}_x1"]
+FIELDNAMES.append("error")
+
 
 def discover_pairs(directory: str):
-    """Finds every Train_Dst_*.txt anywhere under `directory` (recursive -
-    handles layouts like Auction_Zscore_Train/ and Auction_Zscore_Test/
-    living in separate sibling folders, not just flat in one directory),
+    """Finds every Train_Dst_*.txt anywhere under `directory` (recursive),
     and matches each to its Test_Dst_* counterpart by filename, searched
     recursively under the SAME root (wherever it actually lives).
-    Returns (pairs, unmatched) where pairs is a list of
-    (label, train_path, test_path) and unmatched is a list of train
-    files that had no corresponding test file found anywhere under the
-    root - reported, not skipped silently."""
+    Returns (pairs, unmatched)."""
     train_files = sorted(glob.glob(os.path.join(directory, "**", "Train_Dst_*.txt"),
                                     recursive=True))
 
-    # Build a lookup of every Test_Dst_*.txt under the root, keyed by
-    # filename, so a Train file in one subfolder can find its Test
-    # counterpart in a completely different sibling subfolder.
     test_files = glob.glob(os.path.join(directory, "**", "Test_Dst_*.txt"),
                             recursive=True)
     test_by_name = {}
@@ -57,14 +76,12 @@ def discover_pairs(directory: str):
     for train_path in train_files:
         fname = os.path.basename(train_path)
         test_fname = fname.replace("Train_Dst_", "Test_Dst_", 1)
-        label = fname[len("Train_Dst_"):-len(".txt")]  # e.g. "Auction_ZScore_CF_1"
+        label = fname[len("Train_Dst_"):-len(".txt")]
 
         candidates = test_by_name.get(test_fname, [])
         if len(candidates) == 1:
             pairs.append((label, train_path, candidates[0]))
         elif len(candidates) > 1:
-            # Same filename found in more than one subfolder - ambiguous,
-            # don't guess which one is "right".
             unmatched.append((train_path, f"ambiguous: {len(candidates)} files "
                                            f"named {test_fname} found"))
         else:
@@ -73,28 +90,45 @@ def discover_pairs(directory: str):
     return pairs, unmatched
 
 
-def run_one(train_path: str, test_path: str, horizon: int):
-    """Same as fi2010_evaluate.evaluate(), but returns the numbers
-    instead of just printing them, so batch mode can collect them into
-    a table."""
-    X_train, y_train = load_fold(train_path, horizon)
-    X_test, y_test = load_fold(test_path, horizon)
-
+def fit_and_score(X_train, y_train, X_test, y_test):
     model = LogisticRegression()
     model.fit(X_train, y_train)
     probs = model.predict_proba(X_test)[:, 1]
 
-    model_msr = float(np.mean((probs - y_test) ** 2))
+    msr = float(np.mean((probs - y_test) ** 2))
     try:
-        model_auc = float(roc_auc_score(y_test, probs))
+        auc = float(roc_auc_score(y_test, probs))
     except ValueError:
-        model_auc = None  # single class in test split for this fold/horizon
+        auc = None  # single class in this test split
 
-    return {
-        "train_n": len(y_train), "test_n": len(y_test),
-        "model_auc": model_auc, "model_msr": model_msr,
-        "x0": float(model.intercept_[0]), "x1": float(model.coef_[0][0]),
-    }
+    return {"auc": auc, "msr": msr,
+            "x0": float(model.intercept_[0]), "x1": float(model.coef_[0][0])}
+
+
+def load_completed_folds(out_path: str) -> set:
+    """Scans an existing results CSV (from a previous, possibly
+    interrupted run) and returns the set of fold labels that already
+    have all 5 horizons present with status='ok'. Used to skip
+    re-computing folds that finished successfully last time, so an
+    interrupted run can resume instead of starting over from pair 1.
+    Returns an empty set if the file doesn't exist or can't be read."""
+    if not os.path.exists(out_path):
+        return set()
+
+    ok_counts = {}
+    try:
+        with open(out_path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row.get("status") == "ok":
+                    fold = row["fold"]
+                    ok_counts[fold] = ok_counts.get(fold, 0) + 1
+    except Exception as e:
+        print(f"Could not read existing {out_path} to resume ({e}) - starting fresh.")
+        return set()
+
+    completed = {fold for fold, count in ok_counts.items() if count >= 5}
+    return completed
 
 
 def main(directory: str, out_path: str):
@@ -109,51 +143,121 @@ def main(directory: str, out_path: str):
                 print(f"  {u}  [{reason}]")
         return
 
-    print(f"Found {len(pairs)} fold pair(s) to run x 5 horizons "
-          f"= {len(pairs) * 5} total evaluations.\n")
+    completed = load_completed_folds(out_path)
+    if completed:
+        print(f"Found {len(completed)} already-completed fold(s) in {out_path} - "
+              f"these will be SKIPPED, not recomputed:")
+        for f in sorted(completed):
+            print(f"  {f}")
+        print()
+        pairs = [(label, tr, te) for label, tr, te in pairs if label not in completed]
+
+    print(f"Found {len(pairs)} fold pair(s) remaining to run x 5 horizons x 3 signals "
+          f"(raw/filtered/residual) = {len(pairs) * 5} rows.\n")
     if unmatched:
         print(f"WARNING: {len(unmatched)} Train file(s) skipped:")
         for u, reason in unmatched:
             print(f"  {u}  [{reason}]")
         print()
 
-    rows = []
-    for label, train_path, test_path in pairs:
-        for h in range(5):
-            print(f"[{label}] horizon={HORIZON_NAMES[h]} ...", end=" ", flush=True)
-            try:
-                r = run_one(train_path, test_path, h)
-            except Exception as e:
-                print(f"FAILED: {e}")
-                rows.append({"fold": label, "horizon": HORIZON_NAMES[h],
-                             "status": "error", "error": str(e)})
-                continue
+    if not pairs:
+        print("Nothing left to do - all folds already completed.")
+        return
 
-            auc_str = f"{r['model_auc']:.3f}" if r["model_auc"] is not None else "n/a"
-            print(f"AUC={auc_str} MSR={r['model_msr']:.3f}")
-
-            rows.append({
-                "fold": label, "horizon": HORIZON_NAMES[h], "status": "ok",
-                "train_n": r["train_n"], "test_n": r["test_n"],
-                "model_auc": r["model_auc"], "model_msr": r["model_msr"],
-                "x0": r["x0"], "x1": r["x1"],
-            })
-
-    fieldnames = ["fold", "horizon", "status", "train_n", "test_n",
-                  "model_auc", "model_msr", "x0", "x1", "error"]
-    with open(out_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    file_exists = os.path.exists(out_path)
+    csv_file = open(out_path, "a", newline="")
+    writer = csv.DictWriter(csv_file, fieldnames=FIELDNAMES)
+    if not file_exists:
         writer.writeheader()
-        for row in rows:
+        csv_file.flush()
+
+    n_ok = 0
+    all_aucs = {s: [] for s in SIGNALS}
+    t_start = time.time()
+
+    for pair_idx, (label, train_path, test_path) in enumerate(pairs, start=1):
+        t_pair_start = time.time()
+        print(f"[{pair_idx}/{len(pairs)}] {label}: loading + filtering "
+              f"train file...", flush=True)
+        try:
+            raw_tr, filt_tr, resid_tr, labels_tr = load_and_filter_with_raw(train_path)
+        except Exception as e:
+            print(f"  FAILED to load/filter train file: {e}")
+            for h in range(5):
+                writer.writerow({"fold": label, "horizon": HORIZON_NAMES[h],
+                                  "status": "error",
+                                  "error": f"train load/filter failed: {e}"})
+            csv_file.flush()
+            continue
+
+        print(f"[{pair_idx}/{len(pairs)}] {label}: loading + filtering "
+              f"test file...", flush=True)
+        try:
+            raw_te, filt_te, resid_te, labels_te = load_and_filter_with_raw(test_path)
+        except Exception as e:
+            print(f"  FAILED to load/filter test file: {e}")
+            for h in range(5):
+                writer.writerow({"fold": label, "horizon": HORIZON_NAMES[h],
+                                  "status": "error",
+                                  "error": f"test load/filter failed: {e}"})
+            csv_file.flush()
+            continue
+
+        train_signals = {"raw": raw_tr, "filtered": filt_tr, "residual": resid_tr}
+        test_signals = {"raw": raw_te, "filtered": filt_te, "residual": resid_te}
+
+        for h in range(5):
+            row = {"fold": label, "horizon": HORIZON_NAMES[h], "status": "ok"}
+            row_ok = True
+            summary_bits = []
+
+            for sig in SIGNALS:
+                X_train, y_train = labels_for_horizon(train_signals[sig], labels_tr, h)
+                X_test, y_test = labels_for_horizon(test_signals[sig], labels_te, h)
+
+                if sig == SIGNALS[0]:
+                    row["train_n"] = len(y_train)
+                    row["test_n"] = len(y_test)
+
+                try:
+                    r = fit_and_score(X_train, y_train, X_test, y_test)
+                except Exception as e:
+                    row_ok = False
+                    row["status"] = "error"
+                    row["error"] = f"{sig}: {e}"
+                    break
+
+                row[f"{sig}_auc"] = r["auc"]
+                row[f"{sig}_msr"] = r["msr"]
+                row[f"{sig}_x0"] = r["x0"]
+                row[f"{sig}_x1"] = r["x1"]
+
+                auc_str = f"{r['auc']:.3f}" if r["auc"] is not None else "n/a"
+                summary_bits.append(f"{sig}={auc_str}")
+                if r["auc"] is not None:
+                    all_aucs[sig].append(r["auc"])
+
+            print(f"  [{HORIZON_NAMES[h]}] " + "  ".join(summary_bits) if row_ok
+                  else f"  [{HORIZON_NAMES[h]}] FAILED: {row.get('error')}")
+
             writer.writerow(row)
+            csv_file.flush()
+            if row_ok:
+                n_ok += 1
 
-    print(f"\nWrote {len(rows)} row(s) to {out_path}")
+        elapsed_pair = time.time() - t_pair_start
+        elapsed_total = time.time() - t_start
+        avg_per_pair = elapsed_total / pair_idx
+        remaining = avg_per_pair * (len(pairs) - pair_idx)
+        print(f"  ({elapsed_pair:.0f}s for this pair, "
+              f"~{remaining/60:.1f} min remaining)\n", flush=True)
 
-    ok_rows = [r for r in rows if r["status"] == "ok" and r["model_auc"] is not None]
-    if ok_rows:
-        avg_auc = sum(r["model_auc"] for r in ok_rows) / len(ok_rows)
-        print(f"Mean AUC across all {len(ok_rows)} successful evaluations: {avg_auc:.3f} "
-              f"(null baseline: 0.500)")
+    csv_file.close()
+    print(f"Done. Wrote {n_ok} successful row(s) to {out_path}")
+    for sig in SIGNALS:
+        if all_aucs[sig]:
+            print(f"Mean {sig} AUC across {len(all_aucs[sig])} evaluations: "
+                  f"{sum(all_aucs[sig])/len(all_aucs[sig]):.3f} (null baseline: 0.500)")
 
 
 if __name__ == "__main__":

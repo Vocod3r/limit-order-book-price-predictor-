@@ -1,0 +1,32 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-ink: #0b0f14;
+  --color-panel: #121821;
+  --color-panel-raised: #171f2a;
+  --color-line: #232b36;
+  --color-bid: #3ddc84;
+  --color-bid-dim: #1f6b45;
+  --color-ask: #ff5c5c;
+  --color-ask-dim: #7a2c2c;
+  --color-signal: #f5a623;
+  --color-text-primary: #e6edf3;
+  --color-text-muted: #7c8798;
+
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+  --font-ui: "Inter", sans-serif;
+}
+
+body {
+  background: var(--color-ink);
+  color: var(--color-text-primary);
+  font-family: var(--font-ui);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
