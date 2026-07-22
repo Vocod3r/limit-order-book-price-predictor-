@@ -71,22 +71,29 @@ def build_transition_matrix(dt: float, regime: str) -> np.ndarray:
 def build_process_noise(regime: str,
                          base_q: float = 0.05,
                          depletion_q: float = 2.0,
-                         depletion_bias: float = -8.0
+                         depletion_bias: float = -3.0,
+                         queue_shock_q: float = 0.5
                          ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Q_s : process noise covariance for regime s.
     bias : deterministic drift-shift used to push the model toward
     depletion in that regime (a simple way to fold a jump component into
     a linear-Gaussian filter without a full jump-diffusion model).
+
+    queue_shock_q : direct process noise added to q_b/q_a themselves (not
+    just their drift terms) in the depleting regimes, so a real queue-depth
+    shock isn't forced to propagate only through the slower drift channel.
     """
     Q = np.eye(N_STATES) * base_q
     bias = np.zeros(N_STATES)
 
     if regime == "BID_DEPLETING":
         Q[IDX_MUB, IDX_MUB] = depletion_q
+        Q[IDX_QB, IDX_QB] = queue_shock_q
         bias[IDX_MUB] = depletion_bias
     elif regime == "ASK_DEPLETING":
         Q[IDX_MUA, IDX_MUA] = depletion_q
+        Q[IDX_QA, IDX_QA] = queue_shock_q
         bias[IDX_MUA] = depletion_bias
 
     return Q, bias
@@ -102,10 +109,28 @@ H[3, IDX_QA] = 1.0
 # Observation noise R (tune per instrument / tick-size)
 R = np.diag([0.0025, 0.0025, 1.0, 1.0])
 
+
+def build_observation_noise(regime: str,
+                             base_R: np.ndarray = R,
+                             depleting_scale: float = 0.15
+                             ) -> np.ndarray:
+    """
+    Shrink observation noise on q_b/q_a when in a depleting regime, so the
+    Kalman gain trusts the observed queue-depth jump instead of smoothing
+    it away through the (slower) drift channel.
+    """
+    R_s = base_R.copy()
+    if regime == "BID_DEPLETING":
+        R_s[2, 2] *= depleting_scale   # q_b observation index in H/z
+    elif regime == "ASK_DEPLETING":
+        R_s[3, 3] *= depleting_scale   # q_a observation index in H/z
+    return R_s
+
+
 # Regime transition matrix PI[i, j] = P(s_t = j | s_{t-1} = i)
 # Sticky regimes: staying put is the most likely outcome each tick.
 PI = np.array([
-    [0.94, 0.03, 0.03],   # from STABLE
+    [0.75, 0.125, 0.125],   # from STABLE
     [0.15, 0.80, 0.05],   # from BID_DEPLETING
     [0.15, 0.05, 0.80],   # from ASK_DEPLETING
 ])
@@ -128,7 +153,7 @@ def kf_predict(state: KalmanState, F: np.ndarray, Q: np.ndarray,
     return KalmanState(x_pred, P_pred)
 
 
-def kf_update(state: KalmanState, z: np.ndarray) -> Tuple[KalmanState, float]:
+def kf_update(state: KalmanState, z: np.ndarray, R: np.ndarray) -> Tuple[KalmanState, float]:
     """Returns (updated_state, log_likelihood_of_z_under_this_model)."""
     y = z - H @ state.x                       # innovation
     S = H @ state.P @ H.T + R                 # innovation covariance
@@ -188,8 +213,9 @@ class IMMFilter:
         for j, regime in enumerate(REGIMES):
             F = build_transition_matrix(self.dt, regime)
             Q, bias = build_process_noise(regime)
+            R_s = build_observation_noise(regime)
             pred = kf_predict(mixed_states[j], F, Q, bias)
-            upd, ll = kf_update(pred, z)
+            upd, ll = kf_update(pred, z, R_s)
             new_states.append(upd)
             log_likelihoods[j] = ll
 
