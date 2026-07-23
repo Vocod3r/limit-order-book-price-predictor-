@@ -1,15 +1,17 @@
 import { useState } from 'react'
 import { submitBid, submitAsk } from '../api/client'
 
-export default function OrderForm({ stockId, onSubmitted }) {
-  const [side, setSide] = useState('bid')
+export default function OrderForm({ stockId, mode = 'both', onSubmitted }) {
+  // mode: 'buyer' locks to bids, 'seller' locks to asks, 'both' shows the toggle
+  const [side, setSide] = useState(mode === 'seller' ? 'ask' : 'bid')
   const [name, setName] = useState('')
   const [price, setPrice] = useState('')
   const [quantity, setQuantity] = useState('')
   const [status, setStatus] = useState(null) // null | 'sending' | 'sent' | 'error'
   const [errorMsg, setErrorMsg] = useState('')
 
-  const isBid = side === 'bid'
+  const isBid = mode === 'buyer' ? true : mode === 'seller' ? false : side === 'bid'
+  const canToggle = mode === 'both'
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -37,27 +39,31 @@ export default function OrderForm({ stockId, onSubmitted }) {
   return (
     <form onSubmit={handleSubmit} className="bg-panel border border-line rounded-xl p-5">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="font-display text-lg font-semibold">Place order</h2>
-        <div className="flex rounded-lg border border-line overflow-hidden">
-          <button
-            type="button"
-            onClick={() => setSide('bid')}
-            className={`px-3 py-1.5 text-xs font-ui font-medium transition-colors ${
-              isBid ? 'bg-bid-dim text-bid' : 'text-text-muted hover:text-text-primary'
-            }`}
-          >
-            Buy
-          </button>
-          <button
-            type="button"
-            onClick={() => setSide('ask')}
-            className={`px-3 py-1.5 text-xs font-ui font-medium transition-colors ${
-              !isBid ? 'bg-ask-dim text-ask' : 'text-text-muted hover:text-text-primary'
-            }`}
-          >
-            Sell
-          </button>
-        </div>
+        <h2 className="font-display text-lg font-semibold">
+          {mode === 'buyer' ? 'Place bid' : mode === 'seller' ? 'Place ask' : 'Place order'}
+        </h2>
+        {canToggle && (
+          <div className="flex rounded-lg border border-line overflow-hidden">
+            <button
+              type="button"
+              onClick={() => setSide('bid')}
+              className={`px-3 py-1.5 text-xs font-ui font-medium transition-colors ${
+                isBid ? 'bg-bid-dim text-bid' : 'text-text-muted hover:text-text-primary'
+              }`}
+            >
+              Buy
+            </button>
+            <button
+              type="button"
+              onClick={() => setSide('ask')}
+              className={`px-3 py-1.5 text-xs font-ui font-medium transition-colors ${
+                !isBid ? 'bg-ask-dim text-ask' : 'text-text-muted hover:text-text-primary'
+              }`}
+            >
+              Sell
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex flex-col gap-3">
