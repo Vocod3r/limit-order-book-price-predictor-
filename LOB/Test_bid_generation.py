@@ -370,18 +370,37 @@ def _highest_registered_bid(stock_id: str):
     return max(prices) if prices else None
 
 
-if __name__ == "__main__":
-    if len(sys.argv) != 5:
-        print("Usage: py Test_bid_generation.py <odoo_url> <odoo_db> <odoo_username> <odoo_api_key>")
-        sys.exit(1)
+# ---------------------------------------------------------------------------
+# Odoo connection setup - runs at IMPORT time (not just inside __main__) so
+# gunicorn (`gunicorn Test_bid_generation:app`) can find `app` fully wired
+# up without ever calling __main__. Prefers env vars (what real hosts give
+# you); falls back to the original CLI-args usage for local dev so
+# `py Test_bid_generation.py <url> <db> <user> <key>` still works unchanged.
+# ---------------------------------------------------------------------------
+import os
+import xmlrpc.client
 
+if len(sys.argv) == 5:
     url, db, username, api_key = sys.argv[1:5]
-    odoo_config = OdooConfig(url=url, db=db, username=username, api_key=api_key)
-    ingestion_client = BidIngestionClient(odoo_config, dry_run=False)
+elif all(os.environ.get(k) for k in ("ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_API_KEY")):
+    url = os.environ["ODOO_URL"]
+    db = os.environ["ODOO_DB"]
+    username = os.environ["ODOO_USERNAME"]
+    api_key = os.environ["ODOO_API_KEY"]
+else:
+    print("Missing Odoo credentials. Either run:")
+    print("  py Test_bid_generation.py <odoo_url> <odoo_db> <odoo_username> <odoo_api_key>")
+    print("or set ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_API_KEY as environment variables.")
+    sys.exit(1)
 
-    import xmlrpc.client
-    common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
-    uid = common.authenticate(db, username, api_key, {})
-    models_client = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
+odoo_config = OdooConfig(url=url, db=db, username=username, api_key=api_key)
+ingestion_client = BidIngestionClient(odoo_config, dry_run=False)
 
-    app.run(host="0.0.0.0", port=5051)
+_common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
+uid = _common.authenticate(db, username, api_key, {})
+models_client = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/object")
+
+if __name__ == "__main__":
+    # Local dev only - production hosts run this via gunicorn instead,
+    # which imports `app` directly and never executes this block.
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5051)))
