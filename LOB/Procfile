@@ -1,0 +1,1 @@
+web: gunicorn Test_bid_generation:app
