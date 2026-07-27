@@ -5,6 +5,7 @@ export default function OrderForm({ stockId, mode = 'both', onSubmitted }) {
   // mode: 'buyer' locks to bids, 'seller' locks to asks, 'both' shows the toggle
   const [side, setSide] = useState(mode === 'seller' ? 'ask' : 'bid')
   const [name, setName] = useState('')
+  const [email, setEmail] = useState('')
   const [price, setPrice] = useState('')
   const [quantity, setQuantity] = useState('')
   const [status, setStatus] = useState(null) // null | 'sending' | 'sent' | 'error'
@@ -21,7 +22,7 @@ export default function OrderForm({ stockId, mode = 'both', onSubmitted }) {
     setErrorMsg('')
     try {
       if (isBid) {
-        await submitBid({ buyer: name, stockId, price: Number(price), quantity: Number(quantity) })
+        await submitBid({ buyer: name, buyerEmail: email || undefined, stockId, price: Number(price), quantity: Number(quantity) })
       } else {
         await submitAsk({ seller: name, stockId, price: Number(price), quantity: Number(quantity) })
       }
@@ -78,6 +79,21 @@ export default function OrderForm({ stockId, mode = 'both', onSubmitted }) {
             className="bg-panel-raised border border-line rounded-md px-3 py-2 text-sm font-ui outline-none focus:border-text-muted"
           />
         </label>
+
+        {isBid && (
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] uppercase tracking-wide text-text-muted font-ui">
+              Email <span className="normal-case text-text-muted">(for invoicing if you win)</span>
+            </span>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              type="email"
+              placeholder="you@company.com"
+              className="bg-panel-raised border border-line rounded-md px-3 py-2 text-sm font-ui outline-none focus:border-text-muted"
+            />
+          </label>
+        )}
 
         <div className="flex gap-3">
           <label className="flex flex-col gap-1 flex-1">

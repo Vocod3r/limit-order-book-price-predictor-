@@ -125,14 +125,14 @@ function mockAuctionResult() {
 
 // --- Public API --------------------------------------------------------
 
-export async function submitBid({ buyer, stockId, price, quantity }) {
+export async function submitBid({ buyer, buyerEmail, stockId, price, quantity }) {
   if (MOCK_MODE) {
     await new Promise((r) => setTimeout(r, 250))
     return { ok: true, id: `mock-${Date.now()}` }
   }
   return request(ENDPOINTS.submitBid, {
     method: 'POST',
-    body: JSON.stringify({ buyer, stock_id: stockId, price, quantity }),
+    body: JSON.stringify({ buyer, buyer_email: buyerEmail, stock_id: stockId, price, quantity }),
   })
 }
 

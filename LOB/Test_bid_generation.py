@@ -12,6 +12,7 @@ Client-side usage:
     POST /bids
     {
       "buyer": "Acme Capital",
+      "buyer_email": "trading@acmecapital.com",
       "stock_id": "AAPL_STOCK",
       "price": 185.40,
       "quantity": 300
@@ -49,11 +50,14 @@ Routes added to actually connect the React frontend end-to-end:
 ---------------------------------------------------------------------------
 """
 
+import os
 import re
 import sys
+import xmlrpc.client
 from datetime import datetime
 
 from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
 
 from bid_ingestion import RawBid, validate_bids, BidIngestionClient, OdooConfig
 from finnhub_market_data import BrokerMarketData, BrokerConfig
@@ -66,11 +70,7 @@ from LOB_ssm import (
 from promote_winners import WinnerPromotionClient
 
 app = Flask(__name__)
-
-from flask_cors import CORS   # add this near your other imports at the top
-
-app = Flask(__name__)
-CORS(app, origins=["https://lobbasedauctioningpipeline.vercel.app"])   # add this line
+CORS(app, origins=["https://lobbasedauctioningpipeline.vercel.app"])
 
 FINNHUB_API_KEY = "d9biu5hr01qv2lms14bgd9biu5hr01qv2lms14c0"
 STOCK_SYMBOL_MAP = {"AAPL_STOCK": "AAPL", "TSLA_STOCK": "TSLA", "MSFT_STOCK": "MSFT"}
@@ -134,12 +134,14 @@ def _list_bids():
 def _submit_bid():
     data = request.get_json(force=True)
     try:
+        raw_email = data.get("buyer_email")
         bid = RawBid(
             buyer=str(data["buyer"]),
             stock_id=str(data["stock_id"]),
             price=float(data["price"]),
             quantity=float(data["quantity"]),
             timestamp=datetime.now(),
+            buyer_email=str(raw_email).strip() or None if raw_email else None,
         )
     except (KeyError, ValueError) as e:
         return jsonify({"status": "error", "error": f"invalid bid payload: {e}"}), 400
@@ -382,9 +384,6 @@ def _highest_registered_bid(stock_id: str):
 # you); falls back to the original CLI-args usage for local dev so
 # `py Test_bid_generation.py <url> <db> <user> <key>` still works unchanged.
 # ---------------------------------------------------------------------------
-import os
-import xmlrpc.client
-
 if len(sys.argv) == 5:
     url, db, username, api_key = sys.argv[1:5]
 elif all(os.environ.get(k) for k in ("ODOO_URL", "ODOO_DB", "ODOO_USERNAME", "ODOO_API_KEY")):

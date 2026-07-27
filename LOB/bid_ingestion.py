@@ -24,6 +24,7 @@ class RawBid:
     price: float
     quantity: float
     timestamp: datetime
+    buyer_email: Optional[str] = None
 
     @property
     def bid_ref(self) -> str:
@@ -122,11 +123,28 @@ class BidIngestionClient:
             self.config.db, self._uid, self.config.api_key, model, method, list(args)
         )
 
-    def ensure_partner(self, name: str) -> int:
+    def ensure_partner(self, name: str, email: Optional[str] = None) -> int:
         if name in self._partner_cache:
-            return self._partner_cache[name]
+            pid = self._partner_cache[name]
+            if email:
+                # covers the case of a partner already created before an
+                # email was ever supplied (e.g. an earlier bid with no
+                # email field) - keep it in sync rather than leaving them
+                # permanently un-invoiceable.
+                self._execute("res.partner", "write", [pid], {"email": email})
+            return pid
+
         existing = self._execute("res.partner", "search", [("name", "=", name)])
-        pid = existing[0] if existing else self._execute("res.partner", "create", {"name": name})
+        if existing:
+            pid = existing[0]
+            if email:
+                self._execute("res.partner", "write", [pid], {"email": email})
+        else:
+            create_vals = {"name": name}
+            if email:
+                create_vals["email"] = email
+            pid = self._execute("res.partner", "create", create_vals)
+
         self._partner_cache[name] = pid
         return pid
 
@@ -149,7 +167,7 @@ class BidIngestionClient:
             if self.bid_already_registered(bid.bid_ref):
                 return {"bid_ref": bid.bid_ref, "status": "skipped_duplicate"}
 
-            partner_id = self.ensure_partner(bid.buyer)
+            partner_id = self.ensure_partner(bid.buyer, bid.buyer_email)
             lead_id = self._execute("crm.lead", "create", {
                 "name": f"Bid - {bid.stock_id} @ {bid.price:.2f} x {bid.quantity:.0f}",
                 "partner_id": partner_id,
