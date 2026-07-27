@@ -67,6 +67,11 @@ from promote_winners import WinnerPromotionClient
 
 app = Flask(__name__)
 
+from flask_cors import CORS   # add this near your other imports at the top
+
+app = Flask(__name__)
+CORS(app, origins=["https://your-app.vercel.app"])   # add this line
+
 FINNHUB_API_KEY = "d9biu5hr01qv2lms14bgd9biu5hr01qv2lms14c0"
 STOCK_SYMBOL_MAP = {"AAPL_STOCK": "AAPL", "TSLA_STOCK": "TSLA", "MSFT_STOCK": "MSFT"}
 bmd = BrokerMarketData(BrokerConfig(api_key=FINNHUB_API_KEY))
