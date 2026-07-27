@@ -37,7 +37,7 @@ regimes, which becomes the "confidence" feature for event detection
 
 import re
 import xmlrpc.client
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
 
@@ -355,28 +355,57 @@ def fetch_bids_from_odoo(config: OdooConfig, stock_id: str,
     return bids
 
 
+# How long a resting bid still counts toward best-level depth before it
+# "ages out". Without this, best_bid_qty is a lifetime running sum of
+# every bid ever seen at the best price (it only ever goes up, aside from
+# resetting when a strictly higher bid arrives) - while the ask side
+# (AskBook) is naturally a live snapshot, since it only ever stores
+# current state. That asymmetry mechanically drags queue_imbalance toward
+# the bid-heavy extreme over a long-running test session instead of
+# oscillating the way FI2010's real, continuously-refreshed order flow
+# does. Treating bids as "currently resting" rather than "ever submitted"
+# fixes the asymmetry without touching bid_ingestion.py/ask_book.py.
+BID_RESTING_WINDOW_SECONDS = 600  # 10 minutes
+
+
+def _best_bid_at(active_bids: List[Tuple[datetime, float, float]],
+                  as_of: datetime,
+                  window_seconds: float) -> Tuple[Optional[float], float]:
+    """Recomputes best_bid_price/qty as of `as_of`, counting only bids
+    whose timestamp falls within the trailing window - i.e. "what's
+    resting right now", not "everything ever submitted"."""
+    window_start = as_of - timedelta(seconds=window_seconds)
+    live = [(p, q) for (t, p, q) in active_bids if window_start <= t <= as_of]
+    if not live:
+        return None, 0.0
+    best_price = max(p for p, _ in live)
+    best_qty = sum(q for p, q in live if p == best_price)
+    return best_price, best_qty
+
+
 def bids_to_ticks(bids: List[FetchedBid],
                    initial_ask_price: float,
-                   initial_ask_qty: float) -> List[Dict[str, float]]:
+                   initial_ask_qty: float,
+                   resting_window_seconds: float = BID_RESTING_WINDOW_SECONDS
+                   ) -> List[Dict[str, float]]:
     """
     Reconstructs a [best_bid, best_ask, bid_qty, ask_qty] tick stream from
     a resting-bid sequence. The ask side isn't in Odoo (bid_ingestion.py
     only registers incoming BUY bids, per Stage 1) so it's carried forward
     from initial_ask_price/qty and only moves if you pass in real ask data
     separately - this reconstruction is for the bid side of the book only.
+
+    best_bid_qty reflects only bids within the trailing
+    `resting_window_seconds` (see BID_RESTING_WINDOW_SECONDS) - bids
+    below best_bid_price, or older than the window, aren't counted, same
+    as real resting orders eventually getting cancelled/replaced.
     """
     ticks = []
-    best_bid_price = None
-    best_bid_qty = 0.0
+    active_bids: List[Tuple[datetime, float, float]] = []
 
     for b in bids:
-        if best_bid_price is None or b.price > best_bid_price:
-            best_bid_price = b.price
-            best_bid_qty = b.quantity
-        elif b.price == best_bid_price:
-            best_bid_qty += b.quantity
-        # bids below best_bid_price rest deeper in the book - not modeled
-        # here since IMMFilter's state vector only tracks best-level depth
+        active_bids.append((b.timestamp, b.price, b.quantity))
+        best_bid_price, best_bid_qty = _best_bid_at(active_bids, b.timestamp, resting_window_seconds)
 
         ticks.append({
             "best_bid": best_bid_price,
@@ -389,7 +418,8 @@ def bids_to_ticks(bids: List[FetchedBid],
 
 
 def bids_and_asks_to_ticks(bids: List[FetchedBid], ask_events: List[dict],
-                            initial_ask_price: float, initial_ask_qty: float
+                            initial_ask_price: float, initial_ask_qty: float,
+                            resting_window_seconds: float = BID_RESTING_WINDOW_SECONDS
                             ) -> List[Dict[str, float]]:
     """
     Like bids_to_ticks(), but merges in REAL ask-side events from
@@ -402,6 +432,12 @@ def bids_and_asks_to_ticks(bids: List[FetchedBid], ask_events: List[dict],
     "event_type" ("new_sell_limit_order"/"ask_reduced"/"ask_depleted"),
     "timestamp", and either "resulting_best_ask"/"resulting_qty" (for new
     orders) or "remaining_qty" (for depletion events).
+
+    best_bid_qty reflects only bids within the trailing
+    `resting_window_seconds` (see BID_RESTING_WINDOW_SECONDS), so it
+    behaves like a live snapshot - the same way the ask side already
+    does, since AskBook only ever stores current state - instead of a
+    lifetime running sum that only ever grows.
     """
     # Tag each bid/ask event with a common "kind" so they can be merged
     # and walked in one pass, sorted purely by timestamp.
@@ -411,19 +447,14 @@ def bids_and_asks_to_ticks(bids: List[FetchedBid], ask_events: List[dict],
     merged.sort(key=lambda item: item[1])
 
     ticks = []
-    best_bid_price = None
-    best_bid_qty = 0.0
+    active_bids: List[Tuple[datetime, float, float]] = []
     ask_price = initial_ask_price
     ask_qty = initial_ask_qty
 
     for kind, ts, item in merged:
         if kind == "bid":
             b = item
-            if best_bid_price is None or b.price > best_bid_price:
-                best_bid_price = b.price
-                best_bid_qty = b.quantity
-            elif b.price == best_bid_price:
-                best_bid_qty += b.quantity
+            active_bids.append((b.timestamp, b.price, b.quantity))
         else:
             e = item
             if e["event_type"] in ("new_sell_limit_order",):
@@ -431,6 +462,8 @@ def bids_and_asks_to_ticks(bids: List[FetchedBid], ask_events: List[dict],
                 ask_qty = e["resulting_qty"]
             elif e["event_type"] in ("ask_reduced", "ask_depleted"):
                 ask_qty = e["remaining_qty"]
+
+        best_bid_price, best_bid_qty = _best_bid_at(active_bids, ts, resting_window_seconds)
 
         ticks.append({
             "best_bid": best_bid_price if best_bid_price is not None else ask_price,
