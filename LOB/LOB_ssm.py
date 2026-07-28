@@ -36,6 +36,7 @@ regimes, which becomes the "confidence" feature for event detection
 """
 
 import re
+import time
 import xmlrpc.client
 from datetime import datetime, timedelta
 from dataclasses import dataclass
@@ -312,6 +313,29 @@ _BID_DESC_RE = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Short-TTL cache for fetch_bids_from_odoo.
+#
+# /bids, /diagnostics/:id, and /auction/:id/winner each independently called
+# fetch_bids_from_odoo (a full crm.lead search_read over XML-RPC), so a
+# single frontend refresh cycle - or a bid submission followed by the
+# frontend's auto-refresh - triggered 3-4+ redundant full-table fetches of
+# the SAME data for the SAME stock_id within the same second. This cache
+# makes repeat calls within TTL_SECONDS free; _invalidate_bid_cache() lets
+# a caller that just wrote a new bid force the next read to be fresh rather
+# than serving a stale cached copy. Only caches the common case
+# (since=None) - callers passing an explicit `since` window bypass it.
+# ---------------------------------------------------------------------------
+_BID_CACHE: Dict[str, Tuple[float, List["FetchedBid"]]] = {}
+_BID_CACHE_TTL_SECONDS = 2.0
+
+
+def _invalidate_bid_cache(stock_id: str) -> None:
+    """Call right after writing a new bid so the next read is fresh
+    instead of serving a stale cached copy."""
+    _BID_CACHE.pop(stock_id, None)
+
+
 def fetch_bids_from_odoo(config: OdooConfig, stock_id: str,
                           since: Optional[datetime] = None,
                           limit: int = 10000) -> List[FetchedBid]:
@@ -320,7 +344,16 @@ def fetch_bids_from_odoo(config: OdooConfig, stock_id: str,
     stock_id, parses out price/qty/timestamp, and returns them time-ordered.
     Raises on auth failure rather than silently returning nothing - a
     connection problem should be loud, not look like "no bids yet".
+
+    Cached in-process for _BID_CACHE_TTL_SECONDS when since=None (see
+    _invalidate_bid_cache) - avoids the redundant full-table re-fetches
+    that were happening 3-4x per frontend refresh cycle / bid submission.
     """
+    if since is None:
+        cached = _BID_CACHE.get(stock_id)
+        if cached is not None and (time.monotonic() - cached[0]) < _BID_CACHE_TTL_SECONDS:
+            return cached[1]
+
     common = xmlrpc.client.ServerProxy(f"{config.url}/xmlrpc/2/common")
     uid = common.authenticate(config.db, config.username, config.api_key, {})
     if not uid:
@@ -352,6 +385,10 @@ def fetch_bids_from_odoo(config: OdooConfig, stock_id: str,
         ))
 
     bids.sort(key=lambda b: b.timestamp)
+
+    if since is None:
+        _BID_CACHE[stock_id] = (time.monotonic(), bids)
+
     return bids
 
 

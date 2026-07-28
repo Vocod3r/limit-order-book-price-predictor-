@@ -7,10 +7,12 @@ export default function AuctionPanel({ result, loading, stockId, role, onEnded }
 
   const [ending, setEnding] = useState(false)
   const [endMessage, setEndMessage] = useState(null) // { type: 'success'|'error', text }
+  const [invoicing, setInvoicing] = useState(null) // per-winner invoice/payment/email results from the last "End auction" call
 
   async function handleEndAuction() {
     setEnding(true)
     setEndMessage(null)
+    setInvoicing(null)
     try {
       const outcome = await endAuction(stockId, result?.ask_price)
 
@@ -27,6 +29,12 @@ export default function AuctionPanel({ result, loading, stockId, role, onEnded }
           type: 'success',
           text: `Auction ended: ${outcome.total_qty_filled} sh filled, ${n} winner(s) promoted to Odoo sales orders.`,
         })
+        // The promotion succeeding does NOT mean invoicing/payment/emailing
+        // succeeded - those are separate steps that can fail independently
+        // (see Accounting.py's own caveat about Odoo tax/journal config).
+        // Surface them explicitly instead of letting a promoted-but-not-
+        // invoiced winner look identical to a fully-settled one.
+        setInvoicing(outcome.invoicing ?? [])
         onEnded?.()
       } else {
         setEndMessage({ type: 'error', text: 'Unexpected response ending the auction.' })
@@ -36,6 +44,20 @@ export default function AuctionPanel({ result, loading, stockId, role, onEnded }
     } finally {
       setEnding(false)
     }
+  }
+
+  function invoicingSummary(entry) {
+    if (entry.error) return { ok: false, text: `Failed: ${entry.error}` }
+    if (entry.invoice_error) return { ok: false, text: `Invoice error: ${entry.invoice_error}` }
+    if (entry.invoice_status && entry.invoice_status !== 'posted') {
+      return { ok: false, text: `Invoice not posted (status: ${entry.invoice_status})` }
+    }
+    const parts = []
+    if (entry.invoice_id) parts.push(`Invoice #${entry.invoice_id} posted`)
+    if (entry.payment_status) parts.push(`payment: ${entry.payment_status}`)
+    if (entry.emailed_to) parts.push(`emailed ${entry.emailed_to}`)
+    else if (entry.email_skipped) parts.push('email skipped (no address on file)')
+    return { ok: true, text: parts.join(', ') || 'Settled' }
   }
 
   return (
@@ -96,6 +118,24 @@ export default function AuctionPanel({ result, loading, stockId, role, onEnded }
             <p className={`text-xs font-ui mt-2 ${endMessage.type === 'success' ? 'text-bid' : 'text-ask'}`}>
               {endMessage.text}
             </p>
+          )}
+
+          {invoicing && invoicing.length > 0 && (
+            <div className="mt-3 pt-3 border-t border-line flex flex-col gap-1.5">
+              <span className="text-[11px] text-text-muted font-ui uppercase tracking-wide">
+                Invoicing
+              </span>
+              {invoicing.map((entry, i) => {
+                const { ok, text } = invoicingSummary(entry)
+                return (
+                  <div key={entry.lead_id ?? i} className="text-xs font-ui flex flex-col">
+                    <span className={ok ? 'text-bid' : 'text-ask'}>
+                      {ok ? '✓' : '✗'} lead {entry.lead_id}: {text}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
           )}
         </div>
       )}

@@ -65,6 +65,7 @@ from LOB_ssm import (
     fetch_bids_from_odoo,
     run_on_odoo_bids_and_asks,
     find_highest_bid_from_odoo,
+    _invalidate_bid_cache,
 )
 from promote_winners import WinnerPromotionClient
 from Accounting import AccountingClient
@@ -156,6 +157,8 @@ def _submit_bid():
         return jsonify({"status": "rejected", "reason": reason}), 422
 
     result = ingestion_client.register_bid(valid_bids[0])
+    if result["status"] == "created":
+        _invalidate_bid_cache(bid.stock_id)
 
     # tell the buyer where they stand right now, relative to other
     # currently-registered bids for this stock (not the final auction
@@ -443,6 +446,7 @@ def auction_end(stock_id):
     filled = result["total_qty_filled"]
     if filled > 0:
         ask_book.deplete(stock_id, filled)
+    _invalidate_bid_cache(stock_id)
 
     return jsonify({
         "status": "executed",
@@ -457,19 +461,15 @@ def auction_end(stock_id):
 
 def _highest_registered_bid(stock_id: str):
     """Highest price among bids already registered in Odoo CRM for this
-    stock - used to tell a buyer if they've been outbid so far. Prices
-    live inside crm.lead's free-text description field (bid_ingestion.py
-    doesn't store price as its own field), so this parses them back out."""
-    leads = models_client.execute_kw(
-        odoo_config.db, uid, odoo_config.api_key, "crm.lead", "search_read",
-        [[("name", "like", f"Bid - {stock_id} @")]], {"fields": ["description"]},
-    )
-    prices = []
-    for lead in leads:
-        m = re.search(r"price=([\d.]+)", lead.get("description") or "")
-        if m:
-            prices.append(float(m.group(1)))
-    return max(prices) if prices else None
+    stock - used to tell a buyer if they've been outbid so far. Reuses
+    fetch_bids_from_odoo's short-TTL cache instead of running its own
+    separate full crm.lead search_read + regex scan (this used to be a
+    duplicate, uncached Odoo round trip on every single bid submit)."""
+    try:
+        bids = fetch_bids_from_odoo(odoo_config, stock_id)
+    except RuntimeError:
+        return None
+    return max((b.price for b in bids), default=None)
 
 
 # ---------------------------------------------------------------------------
