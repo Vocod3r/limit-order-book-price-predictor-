@@ -68,6 +68,7 @@ from LOB_ssm import (
     find_highest_bid_from_odoo,
 )
 from promote_winners import WinnerPromotionClient
+from Accounting import AccountingClient
 
 app = Flask(__name__)
 CORS(app, origins=["https://lobbasedauctioningpipeline.vercel.app"])
@@ -255,7 +256,41 @@ def diagnostics(stock_id):
     })
 
 
-def _serialize_winner(w):
+def _send_invoice_link_email(invoice_id: int, to_email: str):
+    """Emails a direct link to the posted invoice in Odoo - same approach
+    as run_pipeline.py's send_invoice_pdf_email, just reusing this
+    module's already-authenticated models_client/uid instead of opening a
+    fresh xmlrpc connection."""
+    invoice_url = f"{odoo_config.url}/web#id={invoice_id}&model=account.move&view_type=form"
+    mail_id = models_client.execute_kw(odoo_config.db, uid, odoo_config.api_key, "mail.mail", "create", [{
+        "subject": f"Invoice #{invoice_id}",
+        "body_html": f'Your invoice is ready: <a href="{invoice_url}">{invoice_url}</a>',
+        "email_to": to_email,
+    }])
+    try:
+        models_client.execute_kw(odoo_config.db, uid, odoo_config.api_key, "mail.mail", "send", [[mail_id]])
+    except xmlrpc.client.Fault as e:
+        if "cannot marshal None" not in str(e):
+            raise
+
+
+def _lead_partner_email(lead_id: int):
+    """The winner's real email, if one's on file - i.e. res.partner.email,
+    which bid_ingestion.py's ensure_partner() now sets from buyer_email at
+    bid time. Returns None if the bidder never supplied one."""
+    lead = models_client.execute_kw(
+        odoo_config.db, uid, odoo_config.api_key, "crm.lead", "read", [lead_id], {"fields": ["partner_id"]},
+    )
+    if not lead or not lead[0].get("partner_id"):
+        return None
+    partner_id = lead[0]["partner_id"][0]
+    partner = models_client.execute_kw(
+        odoo_config.db, uid, odoo_config.api_key, "res.partner", "read", [partner_id], {"fields": ["email"]},
+    )
+    return partner[0].get("email") if partner else None
+
+
+
     return {
         "buyer": w.buyer,
         "price": w.price,
@@ -311,8 +346,12 @@ def auction_end(stock_id):
       5. Depletes the ask book by the filled quantity, so the book
          reflects the trade and diagnostics see a real Event 1 if it's
          now empty.
-    Invoicing/payment (Accounting.py) stays a separate, manual step -
-    matches run_pipeline.py's existing "invoicing is manual for now".
+    Invoicing (Accounting.py) now runs automatically for each promoted
+    winner, right here - creates + posts the invoice, registers payment,
+    and emails a link to the invoice using that winner's real email
+    (captured at bid time via buyer_email, see bid_ingestion.py). If a
+    winner never supplied an email, their invoice is still created and
+    posted, just not emailed - check the "invoicing" list in the response.
     """
     current = ask_book.get_current(stock_id)
     if current is None:
@@ -346,6 +385,36 @@ def auction_end(stock_id):
     promotion_client = WinnerPromotionClient(odoo_config, dry_run=False)
     promotion = promotion_client.promote_all(winners, stock_id)
 
+    # Invoice + email each winner that actually got promoted this round.
+    # Mirrors run_pipeline.py's Phase 5, but per real bidder email instead
+    # of one hardcoded RECIPIENT_EMAIL - this is what was missing when
+    # bids started coming from the frontend instead of the CLI pipeline.
+    accounting_client = AccountingClient(odoo_config, dry_run=False)
+    invoicing = []
+    for r in promotion["results"]:
+        if r["status"] != "promoted":
+            continue
+        entry = {"lead_id": r["lead_id"], "sale_order_id": r["sale_order_id"]}
+        try:
+            settlement = accounting_client.settle_sale_order(r["sale_order_id"])
+            entry["invoice_status"] = settlement["invoice"]["status"]
+            entry["payment_status"] = settlement["payment"]["status"] if settlement["payment"] else "skipped"
+
+            if settlement["invoice"]["status"] == "posted":
+                invoice_id = settlement["invoice"]["invoice_id"]
+                entry["invoice_id"] = invoice_id
+                email = _lead_partner_email(r["lead_id"])
+                if email:
+                    _send_invoice_link_email(invoice_id, email)
+                    entry["emailed_to"] = email
+                else:
+                    entry["email_skipped"] = "no email on file for this bidder"
+            elif settlement["invoice"]["status"] == "error":
+                entry["invoice_error"] = settlement["invoice"]["error"]
+        except Exception as e:
+            entry["error"] = str(e)
+        invoicing.append(entry)
+
     filled = result["total_qty_filled"]
     if filled > 0:
         ask_book.deplete(stock_id, filled)
@@ -357,6 +426,7 @@ def auction_end(stock_id):
         "total_qty_filled": filled,
         "qty_unfilled": result["qty_unfilled"],
         "promotion_summary": promotion["summary"],
+        "invoicing": invoicing,
     })
 
 
