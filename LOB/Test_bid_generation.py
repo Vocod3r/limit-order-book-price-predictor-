@@ -57,6 +57,8 @@ import sys
 import xmlrpc.client
 from datetime import datetime
 
+import requests
+
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 
@@ -285,21 +287,49 @@ def diagnostics(stock_id):
 
 
 def _send_invoice_email(invoice_id: int, to_email: str):
-    """Renders the invoice as a real PDF and emails it as an attachment,
-    rather than relying on Odoo's standard template's own report
-    attachment config (email_template_edi_invoice) - which turned out to
-    be misconfigured/missing on this install, sending the template text
-    with no PDF at all. This renders and attaches explicitly instead, so
-    it doesn't depend on that template setting being correct.
+    """Downloads the invoice PDF and emails it as an attachment.
+
+    ir.actions.report._render_qweb_pdf is a PRIVATE method (leading
+    underscore) - Odoo blocks calling private methods over XML-RPC
+    entirely (same restriction Accounting.py's own docstring already
+    flagged for invoice creation), so that call fails with "Private
+    methods cannot be called remotely" regardless of credentials.
+
+    Workaround: authenticate a real web session (separate from the
+    XML-RPC session) and download the PDF through Odoo's public
+    /report/pdf/<report>/<id> HTTP route instead - not an XML-RPC method
+    call, so it isn't subject to that restriction.
     """
-    report_result = models_client.execute_kw(
-        odoo_config.db, uid, odoo_config.api_key,
-        "ir.actions.report", "_render_qweb_pdf",
-        ["account.account_invoices", [invoice_id]],
+    session = requests.Session()
+    auth_resp = session.post(
+        f"{odoo_config.url}/web/session/authenticate",
+        json={
+            "jsonrpc": "2.0",
+            "method": "call",
+            "params": {
+                "db": odoo_config.db,
+                "login": odoo_config.username,
+                "password": odoo_config.api_key,
+            },
+        },
+        timeout=30,
     )
-    pdf_content = report_result[0]
-    pdf_bytes = pdf_content.data if isinstance(pdf_content, xmlrpc.client.Binary) else pdf_content
-    pdf_b64 = base64.b64encode(pdf_bytes).decode() if isinstance(pdf_bytes, (bytes, bytearray)) else pdf_bytes
+    auth_data = auth_resp.json()
+    if not auth_data.get("result", {}).get("uid"):
+        raise RuntimeError(
+            f"Could not authenticate a web session for PDF download (API key may not be "
+            f"accepted as a web login password on this Odoo install): {auth_data}"
+        )
+
+    pdf_resp = session.get(
+        f"{odoo_config.url}/report/pdf/account.account_invoices/{invoice_id}", timeout=60,
+    )
+    if pdf_resp.status_code != 200 or "pdf" not in pdf_resp.headers.get("Content-Type", ""):
+        raise RuntimeError(
+            f"Invoice PDF download failed (status={pdf_resp.status_code}, "
+            f"content-type={pdf_resp.headers.get('Content-Type')})"
+        )
+    pdf_b64 = base64.b64encode(pdf_resp.content).decode()
 
     attachment_id = models_client.execute_kw(
         odoo_config.db, uid, odoo_config.api_key,
