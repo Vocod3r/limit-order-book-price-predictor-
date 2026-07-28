@@ -50,6 +50,7 @@ Routes added to actually connect the React frontend end-to-end:
 ---------------------------------------------------------------------------
 """
 
+import base64
 import os
 import re
 import sys
@@ -283,37 +284,48 @@ def diagnostics(stock_id):
     })
 
 
-def _send_invoice_email(invoice_id: int):
-    """Sends the invoice using Odoo's own standard built-in email template
-    (module 'account', xmlid 'email_template_edi_invoice') - the exact
-    same one the "Send by Email" button in the Odoo UI uses. This attaches
-    the real invoice PDF and addresses it using the invoice's partner
-    email automatically, so the recipient gets an actual invoice document
-    they can open directly - no Odoo login required, unlike a bare link
-    into the backend.
-
-    force_send=True sends immediately instead of queueing for Odoo's mail
-    cron, which can otherwise introduce a delay of several minutes.
+def _send_invoice_email(invoice_id: int, to_email: str):
+    """Renders the invoice as a real PDF and emails it as an attachment,
+    rather than relying on Odoo's standard template's own report
+    attachment config (email_template_edi_invoice) - which turned out to
+    be misconfigured/missing on this install, sending the template text
+    with no PDF at all. This renders and attaches explicitly instead, so
+    it doesn't depend on that template setting being correct.
     """
-    template_records = models_client.execute_kw(
+    report_result = models_client.execute_kw(
         odoo_config.db, uid, odoo_config.api_key,
-        "ir.model.data", "search_read",
-        [[("module", "=", "account"), ("name", "=", "email_template_edi_invoice")]],
-        {"fields": ["res_id"]},
+        "ir.actions.report", "_render_qweb_pdf",
+        ["account.account_invoices", [invoice_id]],
     )
-    if not template_records:
-        raise RuntimeError(
-            "Standard Odoo invoice email template (account.email_template_edi_invoice) "
-            "not found - it may have been removed/renamed in this Odoo install."
-        )
-    template_id = template_records[0]["res_id"]
+    pdf_content = report_result[0]
+    pdf_bytes = pdf_content.data if isinstance(pdf_content, xmlrpc.client.Binary) else pdf_content
+    pdf_b64 = base64.b64encode(pdf_bytes).decode() if isinstance(pdf_bytes, (bytes, bytearray)) else pdf_bytes
 
-    models_client.execute_kw(
+    attachment_id = models_client.execute_kw(
         odoo_config.db, uid, odoo_config.api_key,
-        "mail.template", "send_mail",
-        [template_id, invoice_id],
-        {"force_send": True},
+        "ir.attachment", "create", [{
+            "name": f"Invoice-{invoice_id}.pdf",
+            "type": "binary",
+            "datas": pdf_b64,
+            "res_model": "account.move",
+            "res_id": invoice_id,
+            "mimetype": "application/pdf",
+        }],
     )
+
+    mail_id = models_client.execute_kw(
+        odoo_config.db, uid, odoo_config.api_key, "mail.mail", "create", [{
+            "subject": "Your invoice",
+            "body_html": "<p>Please find your invoice attached.</p>",
+            "email_to": to_email,
+            "attachment_ids": [(6, 0, [attachment_id])],
+        }],
+    )
+    try:
+        models_client.execute_kw(odoo_config.db, uid, odoo_config.api_key, "mail.mail", "send", [[mail_id]])
+    except xmlrpc.client.Fault as e:
+        if "cannot marshal None" not in str(e):
+            raise
 
 
 def _sale_order_for_lead(lead_id: int):
@@ -473,7 +485,7 @@ def auction_end(stock_id):
                 entry["invoice_id"] = invoice_id
                 email = _lead_partner_email(r["lead_id"])
                 if email:
-                    _send_invoice_email(invoice_id)
+                    _send_invoice_email(invoice_id, email)
                     entry["emailed_to"] = email
                 else:
                     entry["email_skipped"] = "no email on file for this bidder"
