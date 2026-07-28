@@ -7,7 +7,7 @@ import AuctionPanel from './components/AuctionPanel'
 import { useRole, RolePicker } from './components/RoleGate'
 import { fetchBook, fetchDiagnostics, fetchAuctionResult } from './api/client'
 
-const DEFAULT_STOCKS = ['EVENT_TEST_1', 'MSFT', 'GOOG', 'AAPL']
+const DEFAULT_STOCKS = ['EVENT_TEST_1', 'MSFT', 'GOOG', 'AAPL', 'AMZN', 'TSLA', 'META', 'NFLX', 'NVDA', 'INTC', 'AMD', 'IBM', 'ORCL', 'SAP', 'ADBE', 'CRM', 'UBER', 'LYFT', 'SNAP', 'TWTR']
 const CUSTOM_STOCKS_KEY = 'lob_custom_stocks'
 const POLL_INTERVAL_MS = 4000
 
