@@ -42,11 +42,10 @@ Routes added to actually connect the React frontend end-to-end:
                                      determines the winner(s), promotes them
                                      into Odoo (crm.lead -> opportunity ->
                                      confirmed sale.order) via
-                                     promote_winners.py, and depletes the
-                                     ask book by the filled quantity.
-                                     Accounting/invoicing stays manual
-                                     (Settle_existing.py), same as
-                                     run_pipeline.py's existing design.
+                                     promote_winners.py, invoices +
+                                     emails each winner automatically, and
+                                     depletes the ask book by the filled
+                                     quantity.
 ---------------------------------------------------------------------------
 """
 
@@ -256,6 +255,16 @@ def diagnostics(stock_id):
     })
 
 
+def _serialize_winner(w):
+    return {
+        "buyer": w.buyer,
+        "price": w.price,
+        "quantity": w.quantity,
+        "timestamp": w.timestamp.isoformat(),
+        "lead_id": w.lead_id,
+    }
+
+
 def _send_invoice_link_email(invoice_id: int, to_email: str):
     """Emails a direct link to the posted invoice in Odoo - same approach
     as run_pipeline.py's send_invoice_pdf_email, just reusing this
@@ -274,6 +283,20 @@ def _send_invoice_link_email(invoice_id: int, to_email: str):
             raise
 
 
+def _sale_order_for_lead(lead_id: int):
+    """Finds the sale.order for a lead that was ALREADY promoted on a
+    previous attempt (status == 'already_promoted' from promote_winners.py,
+    which - unlike a fresh 'promoted' result - doesn't carry sale_order_id
+    at all). Without this, retrying "End auction" on a stock that was
+    already promoted once silently skips invoicing for that winner, since
+    there'd be no sale_order_id to invoice against."""
+    orders = models_client.execute_kw(
+        odoo_config.db, uid, odoo_config.api_key, "sale.order", "search",
+        [[("opportunity_id", "=", lead_id)]],
+    )
+    return orders[0] if orders else None
+
+
 def _lead_partner_email(lead_id: int):
     """The winner's real email, if one's on file - i.e. res.partner.email,
     which bid_ingestion.py's ensure_partner() now sets from buyer_email at
@@ -288,16 +311,6 @@ def _lead_partner_email(lead_id: int):
         odoo_config.db, uid, odoo_config.api_key, "res.partner", "read", [partner_id], {"fields": ["email"]},
     )
     return partner[0].get("email") if partner else None
-
-
-
-    return {
-        "buyer": w.buyer,
-        "price": w.price,
-        "quantity": w.quantity,
-        "timestamp": w.timestamp.isoformat(),
-        "lead_id": w.lead_id,
-    }
 
 
 @app.route("/auction/<stock_id>/winner")
@@ -352,6 +365,9 @@ def auction_end(stock_id):
     (captured at bid time via buyer_email, see bid_ingestion.py). If a
     winner never supplied an email, their invoice is still created and
     posted, just not emailed - check the "invoicing" list in the response.
+    Also correctly handles a RETRY of a stock whose winner was already
+    promoted on a previous attempt (see _sale_order_for_lead below) -
+    without that, invoicing would silently be skipped on any retry.
     """
     current = ask_book.get_current(stock_id)
     if current is None:
@@ -385,18 +401,27 @@ def auction_end(stock_id):
     promotion_client = WinnerPromotionClient(odoo_config, dry_run=False)
     promotion = promotion_client.promote_all(winners, stock_id)
 
-    # Invoice + email each winner that actually got promoted this round.
-    # Mirrors run_pipeline.py's Phase 5, but per real bidder email instead
-    # of one hardcoded RECIPIENT_EMAIL - this is what was missing when
-    # bids started coming from the frontend instead of the CLI pipeline.
+    # Invoice + email each winner. Handles both a fresh promotion this
+    # round AND a winner who was already promoted on an earlier attempt
+    # (e.g. you clicked "End auction" before, and are retrying) - in the
+    # latter case promote_winners.py doesn't hand back sale_order_id, so
+    # we look it up ourselves rather than silently skipping invoicing.
     accounting_client = AccountingClient(odoo_config, dry_run=False)
     invoicing = []
     for r in promotion["results"]:
-        if r["status"] != "promoted":
-            continue
-        entry = {"lead_id": r["lead_id"], "sale_order_id": r["sale_order_id"]}
+        if r["status"] == "promoted":
+            sale_order_id = r["sale_order_id"]
+        elif r["status"] == "already_promoted":
+            sale_order_id = _sale_order_for_lead(r["lead_id"])
+            if sale_order_id is None:
+                invoicing.append({"lead_id": r["lead_id"], "error": "already promoted, but no sale.order found for it"})
+                continue
+        else:
+            continue  # status == "error" - nothing to invoice
+
+        entry = {"lead_id": r["lead_id"], "sale_order_id": sale_order_id}
         try:
-            settlement = accounting_client.settle_sale_order(r["sale_order_id"])
+            settlement = accounting_client.settle_sale_order(sale_order_id)
             entry["invoice_status"] = settlement["invoice"]["status"]
             entry["payment_status"] = settlement["payment"]["status"] if settlement["payment"] else "skipped"
 
