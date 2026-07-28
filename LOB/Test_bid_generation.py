@@ -301,6 +301,13 @@ def _send_invoice_email(invoice_id: int, to_email: str):
     call, so it isn't subject to that restriction.
     """
     session = requests.Session()
+    if not ODOO_WEB_PASSWORD:
+        raise RuntimeError(
+            "ODOO_WEB_PASSWORD env var not set. The API key works fine for XML-RPC "
+            "(everything else in this app) but this Odoo install explicitly rejects "
+            "API keys for web session login (AccessDenied) - PDF download needs your "
+            "real Odoo account password, set separately as ODOO_WEB_PASSWORD."
+        )
     auth_resp = session.post(
         f"{odoo_config.url}/web/session/authenticate",
         json={
@@ -309,7 +316,7 @@ def _send_invoice_email(invoice_id: int, to_email: str):
             "params": {
                 "db": odoo_config.db,
                 "login": odoo_config.username,
-                "password": odoo_config.api_key,
+                "password": ODOO_WEB_PASSWORD,
             },
         },
         timeout=30,
@@ -579,6 +586,12 @@ else:
 
 odoo_config = OdooConfig(url=url, db=db, username=username, api_key=api_key)
 ingestion_client = BidIngestionClient(odoo_config, dry_run=False)
+
+# Separate from the API key above - only used for downloading invoice
+# PDFs via Odoo's web report route, since this install rejects API keys
+# for web session login. Optional: if unset, everything else in the app
+# still works, only PDF-attached invoice emails will error clearly.
+ODOO_WEB_PASSWORD = os.environ.get("ODOO_WEB_PASSWORD")
 
 _common = xmlrpc.client.ServerProxy(f"{url}/xmlrpc/2/common")
 uid = _common.authenticate(db, username, api_key, {})
