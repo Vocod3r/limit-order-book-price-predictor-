@@ -42,10 +42,11 @@ Routes added to actually connect the React frontend end-to-end:
                                      determines the winner(s), promotes them
                                      into Odoo (crm.lead -> opportunity ->
                                      confirmed sale.order) via
-                                     promote_winners.py, invoices +
-                                     emails each winner automatically, and
-                                     depletes the ask book by the filled
-                                     quantity.
+                                     promote_winners.py, and depletes the
+                                     ask book by the filled quantity.
+                                     Accounting/invoicing stays manual
+                                     (Settle_existing.py), same as
+                                     run_pipeline.py's existing design.
 ---------------------------------------------------------------------------
 """
 
@@ -65,7 +66,6 @@ from LOB_ssm import (
     fetch_bids_from_odoo,
     run_on_odoo_bids_and_asks,
     find_highest_bid_from_odoo,
-    _invalidate_bid_cache,
 )
 from promote_winners import WinnerPromotionClient
 from Accounting import AccountingClient
@@ -83,6 +83,31 @@ ask_book = AskBook()
 # diagnostics don't hard-fail before a seller has set anything up.
 FALLBACK_ASK_PRICE = 150.00
 FALLBACK_ASK_QTY = 1000
+
+
+def _finnhub_symbol(stock_id: str) -> str:
+    """STOCK_SYMBOL_MAP only covers 3 legacy test tickers - anything else
+    (NVDA, TSLA, META, SAP, ...) is very likely already a real ticker
+    symbol itself now that instruments are added freely from the
+    frontend, so use stock_id directly rather than silently falling back
+    to AAPL for everything unmapped."""
+    return STOCK_SYMBOL_MAP.get(stock_id, stock_id)
+
+
+def _seed_ask_from_finnhub(stock_id: str):
+    """The first time a stock is touched with no ask posted yet, seed one
+    from Finnhub's real live quote instead of leaving it permanently
+    empty until a seller manually posts one. Silently does nothing if the
+    stock already has an ask, or if Finnhub doesn't cover this symbol
+    (free tier, invalid ticker, API hiccup) - a missing seed just means
+    "no ask yet", same as before this existed, not a hard failure."""
+    if ask_book.get_current(stock_id) is not None:
+        return
+    try:
+        quote = bmd.get_reference_quote(_finnhub_symbol(stock_id))
+    except Exception:
+        return
+    ask_book.post_new_ask(stock_id, quote["best_ask"], quote["best_ask_qty"])
 
 
 @app.route("/")
@@ -147,7 +172,7 @@ def _submit_bid():
     except (KeyError, ValueError) as e:
         return jsonify({"status": "error", "error": f"invalid bid payload: {e}"}), 400
 
-    symbol = STOCK_SYMBOL_MAP.get(bid.stock_id, "AAPL")
+    symbol = _finnhub_symbol(bid.stock_id)
     tick_size = bmd.get_instrument_meta(symbol)["tick_size"]
     market_open = True  # TESTING ONLY - bypasses real Finnhub market-hours check
 
@@ -157,8 +182,6 @@ def _submit_bid():
         return jsonify({"status": "rejected", "reason": reason}), 422
 
     result = ingestion_client.register_bid(valid_bids[0])
-    if result["status"] == "created":
-        _invalidate_bid_cache(bid.stock_id)
 
     # tell the buyer where they stand right now, relative to other
     # currently-registered bids for this stock (not the final auction
@@ -184,6 +207,8 @@ def _list_asks():
     stock_id = request.args.get("stock_id")
     if not stock_id:
         return jsonify({"status": "error", "error": "stock_id query param required"}), 400
+
+    _seed_ask_from_finnhub(stock_id)
 
     current = ask_book.get_current(stock_id)
     if current is None:
@@ -258,32 +283,37 @@ def diagnostics(stock_id):
     })
 
 
-def _serialize_winner(w):
-    return {
-        "buyer": w.buyer,
-        "price": w.price,
-        "quantity": w.quantity,
-        "timestamp": w.timestamp.isoformat(),
-        "lead_id": w.lead_id,
-    }
+def _send_invoice_email(invoice_id: int):
+    """Sends the invoice using Odoo's own standard built-in email template
+    (module 'account', xmlid 'email_template_edi_invoice') - the exact
+    same one the "Send by Email" button in the Odoo UI uses. This attaches
+    the real invoice PDF and addresses it using the invoice's partner
+    email automatically, so the recipient gets an actual invoice document
+    they can open directly - no Odoo login required, unlike a bare link
+    into the backend.
 
+    force_send=True sends immediately instead of queueing for Odoo's mail
+    cron, which can otherwise introduce a delay of several minutes.
+    """
+    template_records = models_client.execute_kw(
+        odoo_config.db, uid, odoo_config.api_key,
+        "ir.model.data", "search_read",
+        [[("module", "=", "account"), ("name", "=", "email_template_edi_invoice")]],
+        {"fields": ["res_id"]},
+    )
+    if not template_records:
+        raise RuntimeError(
+            "Standard Odoo invoice email template (account.email_template_edi_invoice) "
+            "not found - it may have been removed/renamed in this Odoo install."
+        )
+    template_id = template_records[0]["res_id"]
 
-def _send_invoice_link_email(invoice_id: int, to_email: str):
-    """Emails a direct link to the posted invoice in Odoo - same approach
-    as run_pipeline.py's send_invoice_pdf_email, just reusing this
-    module's already-authenticated models_client/uid instead of opening a
-    fresh xmlrpc connection."""
-    invoice_url = f"{odoo_config.url}/web#id={invoice_id}&model=account.move&view_type=form"
-    mail_id = models_client.execute_kw(odoo_config.db, uid, odoo_config.api_key, "mail.mail", "create", [{
-        "subject": f"Invoice #{invoice_id}",
-        "body_html": f'Your invoice is ready: <a href="{invoice_url}">{invoice_url}</a>',
-        "email_to": to_email,
-    }])
-    try:
-        models_client.execute_kw(odoo_config.db, uid, odoo_config.api_key, "mail.mail", "send", [[mail_id]])
-    except xmlrpc.client.Fault as e:
-        if "cannot marshal None" not in str(e):
-            raise
+    models_client.execute_kw(
+        odoo_config.db, uid, odoo_config.api_key,
+        "mail.template", "send_mail",
+        [template_id, invoice_id],
+        {"force_send": True},
+    )
 
 
 def _sale_order_for_lead(lead_id: int):
@@ -314,6 +344,16 @@ def _lead_partner_email(lead_id: int):
         odoo_config.db, uid, odoo_config.api_key, "res.partner", "read", [partner_id], {"fields": ["email"]},
     )
     return partner[0].get("email") if partner else None
+
+
+def _serialize_winner(w):
+    return {
+        "buyer": w.buyer,
+        "price": w.price,
+        "quantity": w.quantity,
+        "timestamp": w.timestamp.isoformat(),
+        "lead_id": w.lead_id,
+    }
 
 
 @app.route("/auction/<stock_id>/winner")
@@ -368,9 +408,6 @@ def auction_end(stock_id):
     (captured at bid time via buyer_email, see bid_ingestion.py). If a
     winner never supplied an email, their invoice is still created and
     posted, just not emailed - check the "invoicing" list in the response.
-    Also correctly handles a RETRY of a stock whose winner was already
-    promoted on a previous attempt (see _sale_order_for_lead below) -
-    without that, invoicing would silently be skipped on any retry.
     """
     current = ask_book.get_current(stock_id)
     if current is None:
@@ -404,17 +441,20 @@ def auction_end(stock_id):
     promotion_client = WinnerPromotionClient(odoo_config, dry_run=False)
     promotion = promotion_client.promote_all(winners, stock_id)
 
-    # Invoice + email each winner. Handles both a fresh promotion this
-    # round AND a winner who was already promoted on an earlier attempt
-    # (e.g. you clicked "End auction" before, and are retrying) - in the
-    # latter case promote_winners.py doesn't hand back sale_order_id, so
-    # we look it up ourselves rather than silently skipping invoicing.
+    # Invoice + email each winner that actually got promoted this round.
+    # Mirrors run_pipeline.py's Phase 5, but per real bidder email instead
+    # of one hardcoded RECIPIENT_EMAIL - this is what was missing when
+    # bids started coming from the frontend instead of the CLI pipeline.
     accounting_client = AccountingClient(odoo_config, dry_run=False)
     invoicing = []
     for r in promotion["results"]:
         if r["status"] == "promoted":
             sale_order_id = r["sale_order_id"]
         elif r["status"] == "already_promoted":
+            # Retrying "End auction" on a stock whose winner was already
+            # promoted on a prior attempt - promote_winners.py doesn't
+            # hand back sale_order_id in this case, so look it up
+            # ourselves instead of silently skipping invoicing.
             sale_order_id = _sale_order_for_lead(r["lead_id"])
             if sale_order_id is None:
                 invoicing.append({"lead_id": r["lead_id"], "error": "already promoted, but no sale.order found for it"})
@@ -433,7 +473,7 @@ def auction_end(stock_id):
                 entry["invoice_id"] = invoice_id
                 email = _lead_partner_email(r["lead_id"])
                 if email:
-                    _send_invoice_link_email(invoice_id, email)
+                    _send_invoice_email(invoice_id)
                     entry["emailed_to"] = email
                 else:
                     entry["email_skipped"] = "no email on file for this bidder"
@@ -446,7 +486,6 @@ def auction_end(stock_id):
     filled = result["total_qty_filled"]
     if filled > 0:
         ask_book.deplete(stock_id, filled)
-    _invalidate_bid_cache(stock_id)
 
     return jsonify({
         "status": "executed",
@@ -461,15 +500,19 @@ def auction_end(stock_id):
 
 def _highest_registered_bid(stock_id: str):
     """Highest price among bids already registered in Odoo CRM for this
-    stock - used to tell a buyer if they've been outbid so far. Reuses
-    fetch_bids_from_odoo's short-TTL cache instead of running its own
-    separate full crm.lead search_read + regex scan (this used to be a
-    duplicate, uncached Odoo round trip on every single bid submit)."""
-    try:
-        bids = fetch_bids_from_odoo(odoo_config, stock_id)
-    except RuntimeError:
-        return None
-    return max((b.price for b in bids), default=None)
+    stock - used to tell a buyer if they've been outbid so far. Prices
+    live inside crm.lead's free-text description field (bid_ingestion.py
+    doesn't store price as its own field), so this parses them back out."""
+    leads = models_client.execute_kw(
+        odoo_config.db, uid, odoo_config.api_key, "crm.lead", "search_read",
+        [[("name", "like", f"Bid - {stock_id} @")]], {"fields": ["description"]},
+    )
+    prices = []
+    for lead in leads:
+        m = re.search(r"price=([\d.]+)", lead.get("description") or "")
+        if m:
+            prices.append(float(m.group(1)))
+    return max(prices) if prices else None
 
 
 # ---------------------------------------------------------------------------
