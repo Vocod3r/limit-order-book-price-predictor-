@@ -1,62 +1,6 @@
 {
-  "day2bids": {
+  "AAPL_NOV01": {
     "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "day3_auction": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "auction_bids": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "auction_14072026": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "finnhub_test1": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "AAPL_STOCK_v2": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "AAPL_STOCK": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "TSLA_STOCK": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "MSFT_STOCK": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "AAPL_STOCK_v4": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "TSLA_STOCK_v4": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "MSFT_STOCK_v4": {
-    "total_committed": 1000,
-    "shares_sold": 1000.0
-  },
-  "TEST_STOCK_1": {
-    "total_committed": 1000,
-    "shares_sold": 100.0
-  },
-  "TEST_STOCK_2": {
-    "total_committed": 1000,
-    "shares_sold": 200.0
-  },
-  "EVENT_TEST_1": {
-    "total_committed": 1000,
-    "shares_sold": 300.0
+    "shares_sold": 0.0
   }
 }

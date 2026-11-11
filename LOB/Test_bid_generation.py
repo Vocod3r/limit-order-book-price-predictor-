@@ -74,7 +74,13 @@ from promote_winners import WinnerPromotionClient
 from Accounting import AccountingClient
 
 app = Flask(__name__)
-CORS(app, origins=["https://lobbasedauctioningpipeline.vercel.app"])
+CORS(app, origins=[
+    "https://lobbasedauctioningpipeline.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+])
 
 FINNHUB_API_KEY = "d9biu5hr01qv2lms14bgd9biu5hr01qv2lms14c0"
 STOCK_SYMBOL_MAP = {"AAPL_STOCK": "AAPL", "TSLA_STOCK": "TSLA", "MSFT_STOCK": "MSFT"}
